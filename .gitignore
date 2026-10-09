@@ -6,3 +6,5 @@ old-json-backup/
 test*.json
 *login*.json
 *test*.json
+memory.json
+profile.json
