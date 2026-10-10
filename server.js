@@ -160,6 +160,8 @@ const allowedOrigins = [
     "http://localhost:3000",
     "http://localhost:8158",
     "http://127.0.0.1:8158"
+"https://nani-ai-frontend.onrender.com"
+
 ];
 
 app.use(helmet());
