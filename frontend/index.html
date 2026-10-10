@@ -1,0 +1,148 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+
+    <title>NANI AI</title>
+
+    <link rel="stylesheet" href="style.css">
+</head>
+
+<body>
+
+    <div class="app">
+          <div class="app">
+
+        <!-- LOGIN SCREEN -->
+        <div id="authScreen" class="auth-screen">
+
+            <div class="auth-box">
+
+                <div class="logo" style="margin: 0 auto 20px;">N</div>
+
+                <h2 id="authTitle">Login to NANI AI</h2>
+
+                <input id="authUsername" type="text" placeholder="Username" autocomplete="off">
+                <input id="authPassword" type="password" placeholder="Password" autocomplete="off">
+
+                <button id="authSubmitBtn" class="send-btn" style="width: 100%; border-radius: 12px; margin-top: 10px;">
+                    Login
+                </button>
+
+                <p id="authError" class="auth-error"></p>
+
+                <p class="auth-toggle">
+                    <span id="authToggleText">Don't have an account?</span>
+                    <a href="#" id="authToggleLink">Sign up</a>
+                </p>
+
+            </div>
+
+        </div>
+
+        <!-- HEADER -->
+        <header class="header">
+
+            <div class="brand">
+
+                <div class="logo">
+                    N
+                </div>
+
+                <div class="brand-text">
+                    <h1>NANI AI</h1>
+                    <span>AI Assistant</span>
+                </div>
+
+            </div>
+
+            <button id="newChatBtn" class="new-chat-btn">
+                +
+            </button>
+
+        </header>
+
+
+        <!-- CHAT AREA -->
+        <main id="chatArea" class="chat-area">
+
+            <!-- WELCOME SCREEN -->
+            <section id="welcomeScreen" class="welcome">
+
+                <div class="welcome-logo">
+                    N
+                </div>
+
+                <h2>Welcome to NANI AI</h2>
+
+                <p>
+                    Your personal AI assistant
+                </p>
+
+
+                <!-- QUICK ACTIONS -->
+                <div class="quick-actions">
+
+                    <button class="quick-btn">
+                        🛡️
+                        <span>Cybersecurity</span>
+                    </button>
+
+                    <button class="quick-btn">
+                        💻
+                        <span>Coding</span>
+                    </button>
+
+                    <button class="quick-btn">
+                        🚩
+                        <span>CTF</span>
+                    </button>
+
+                    <button class="quick-btn">
+                        🧠
+                        <span>Learn</span>
+                    </button>
+
+                </div>
+
+            </section>
+
+        </main>
+
+
+        <!-- INPUT AREA -->
+        <footer class="input-area">
+
+            <div class="input-box">
+<button id="micBtn" class="icon-btn">
+    🎤
+</button>
+
+                <input
+                    id="messageInput"
+                    type="text"
+                    placeholder="Ask NANI AI..."
+                    autocomplete="off"
+                >
+
+                <button id="sendBtn" class="send-btn">
+                    ➤
+                </button>
+
+            </div>
+
+            <div class="footer-text">
+                NANI AI • Your AI • Your Future
+            </div>
+
+        </footer>
+
+    </div>
+
+
+    <!-- JavaScript -->
+    <script src="script.js"></script>
+
+</body>
+</html>
