@@ -2101,14 +2101,31 @@ app.post(
         conversationHistory.push({ role: "user", content: userMessage });
         updateProfileFromMessage(userMessage, userProfile);
 
+
         try {
 
-            const answer = await askGeminiStream(conversationHistory, res);
+            let answer;
+            let provider;
+
+            try {
+
+                answer = await askGeminiStream(conversationHistory, res);
+                provider = "Gemini";
+
+            } catch (geminiError) {
+
+                logWarn("Gemini stream failed, falling back to OpenRouter", geminiError);
+
+                answer = await askOpenRouter(conversationHistory);
+                provider = "OpenRouter";
+
+                res.write("data: " + JSON.stringify({ chunk: answer }) + "\n\n");
+            }
 
             conversationHistory.push({ role: "assistant", content: answer });
             saveMemory(conversationHistory);
 
-            res.write("data: " + JSON.stringify({ done: true, provider: "Gemini" }) + "\n\n");
+            res.write("data: " + JSON.stringify({ done: true, provider: provider }) + "\n\n");
             res.end();
 
         } catch (error) {
@@ -2117,12 +2134,9 @@ app.post(
 
             conversationHistory.pop();
 
-            res.write("data: " + JSON.stringify({ error: "Streaming failed. Try again." }) + "\n\n");
+            res.write("data: " + JSON.stringify({ error: "Both AI providers are currently unavailable." }) + "\n\n");
             res.end();
         }
-    }
-);
-
 
 
 // =========================================
