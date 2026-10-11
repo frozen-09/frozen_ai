@@ -101,14 +101,29 @@ const DB_FILE = process.env.DB_FILE || "./nani.db";
 
 const db = new DatabaseSync(DB_FILE);
 
+
+
+
+
+
+
 db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS ctf_sessions (
         id TEXT PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        passwordHash TEXT NOT NULL,
-        createdAt TEXT NOT NULL
+        userId TEXT NOT NULL,
+        challengeName TEXT NOT NULL,
+        category TEXT,
+        description TEXT,
+        clues TEXT NOT NULL DEFAULT '[]',
+        failedApproaches TEXT NOT NULL DEFAULT '[]',
+        chatHistory TEXT NOT NULL DEFAULT '[]',
+        status TEXT NOT NULL DEFAULT 'active',
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
     )
 `);
+
+
 
 db.exec(`
     CREATE TABLE IF NOT EXISTS user_data (
@@ -366,6 +381,121 @@ function loadUserData(userId) {
 
     };
 }
+
+function createCtfSession(userId, challengeName, category, description) {
+
+    const id =
+        Date.now().toString();
+
+    const now =
+        new Date().toISOString();
+
+    db.prepare(`
+        INSERT INTO ctf_sessions
+        (id, userId, challengeName, category, description, clues, failedApproaches, chatHistory, status, createdAt, updatedAt)
+        VALUES (?, ?, ?, ?, ?, '[]', '[]', '[]', 'active', ?, ?)
+    `).run(id, userId, challengeName, category || null, description || null, now, now);
+
+    return id;
+}
+
+
+function listCtfSessions(userId) {
+
+    return db.prepare(`
+        SELECT id, challengeName, category, status, createdAt, updatedAt
+        FROM ctf_sessions
+        WHERE userId = ?
+        ORDER BY updatedAt DESC
+    `).all(userId);
+}
+
+
+function getCtfSession(userId, sessionId) {
+
+    const row =
+        db.prepare(`
+            SELECT * FROM ctf_sessions
+            WHERE id = ? AND userId = ?
+        `).get(sessionId, userId);
+
+    if (!row) {
+        return null;
+    }
+
+    return {
+
+        id: row.id,
+
+        challengeName: row.challengeName,
+
+        category: row.category,
+
+        description: row.description,
+
+        clues: JSON.parse(row.clues),
+
+        failedApproaches: JSON.parse(row.failedApproaches),
+
+        chatHistory: JSON.parse(row.chatHistory),
+
+        status: row.status,
+
+        createdAt: row.createdAt,
+
+        updatedAt: row.updatedAt
+
+    };
+}
+
+
+function updateCtfSession(userId, sessionId, updates) {
+
+    const session =
+        getCtfSession(userId, sessionId);
+
+    if (!session) {
+        return false;
+    }
+
+    const merged = {
+        ...session,
+        ...updates
+    };
+
+    db.prepare(`
+        UPDATE ctf_sessions
+        SET clues = ?,
+            failedApproaches = ?,
+            chatHistory = ?,
+            status = ?,
+            updatedAt = ?
+        WHERE id = ? AND userId = ?
+    `).run(
+        JSON.stringify(merged.clues),
+        JSON.stringify(merged.failedApproaches),
+        JSON.stringify(merged.chatHistory),
+        merged.status,
+        new Date().toISOString(),
+        sessionId,
+        userId
+    );
+
+    return true;
+}
+
+
+function deleteCtfSession(userId, sessionId) {
+
+    const result =
+        db.prepare(`
+            DELETE FROM ctf_sessions
+            WHERE id = ? AND userId = ?
+        `).run(sessionId, userId);
+
+    return result.changes > 0;
+}
+
 
 
 function saveUserData(userId, userData) {
@@ -1344,6 +1474,140 @@ app.get(
         });
     }
 );
+
+
+// =========================================
+// CTF SESSIONS (separate from personal memory)
+// =========================================
+
+app.post(
+    "/api/ctf/sessions",
+    requireAuth,
+    (req, res) => {
+
+        const challengeName =
+            req.body.challengeName;
+
+        const category =
+            req.body.category;
+
+        const description =
+            req.body.description;
+
+        if (
+            !challengeName ||
+            typeof challengeName !== "string" ||
+            challengeName.trim().length === 0
+        ) {
+
+            return res.status(400).json({
+
+                success: false,
+
+                error: "challengeName is required."
+
+            });
+        }
+
+        const id =
+            createCtfSession(
+                req.user.userId,
+                challengeName.trim(),
+                category || null,
+                description || null
+            );
+
+        res.json({
+
+            success: true,
+
+            sessionId: id
+
+        });
+    }
+);
+
+
+app.get(
+    "/api/ctf/sessions",
+    requireAuth,
+    (req, res) => {
+
+        const sessions =
+            listCtfSessions(req.user.userId);
+
+        res.json({
+
+            success: true,
+
+            sessions: sessions
+
+        });
+    }
+);
+
+
+app.get(
+    "/api/ctf/sessions/:id",
+    requireAuth,
+    (req, res) => {
+
+        const session =
+            getCtfSession(req.user.userId, req.params.id);
+
+        if (!session) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                error: "Session not found."
+
+            });
+        }
+
+        res.json({
+
+            success: true,
+
+            session: session
+
+        });
+    }
+);
+
+
+app.delete(
+    "/api/ctf/sessions/:id",
+    requireAuth,
+    (req, res) => {
+
+        const deleted =
+            deleteCtfSession(req.user.userId, req.params.id);
+
+        if (!deleted) {
+
+            return res.status(404).json({
+
+                success: false,
+
+                error: "Session not found."
+
+            });
+        }
+
+        res.json({
+
+            success: true,
+
+            message: "Session deleted."
+
+        });
+    }
+);
+
+
+
 
 
 
