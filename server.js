@@ -87,6 +87,9 @@ if (missingVars.length > 0) {
 }
 
 const app = express();
+
+app.set("trust proxy", 1);
+
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || "development";
 const MEMORY_FILE = "./memory.json";
@@ -101,9 +104,14 @@ const DB_FILE = process.env.DB_FILE || "./nani.db";
 
 const db = new DatabaseSync(DB_FILE);
 
-
-
-
+db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        passwordHash TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+    )
+`);
 
 
 
@@ -132,6 +140,17 @@ db.exec(`
         profile TEXT NOT NULL DEFAULT '{}'
     )
 `);
+
+
+db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        username TEXT UNIQUE NOT NULL,
+        passwordHash TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+    )
+`);
+
 
 console.log("Database ready:", DB_FILE);
 
