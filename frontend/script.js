@@ -423,59 +423,124 @@ try {
 
             else {
 
-        response =
-            await fetch(
-                BACKEND_URL +
-                "/api/chat",
+        typing.remove();
+
+        const aiMessageDiv = createMessage("", "ai");
+
+        let accumulatedText = "";
+        let streamingWorked = false;
+
+        try {
+
+            const streamResponse = await fetch(
+                BACKEND_URL + "/api/chat/stream",
                 {
                     method: "POST",
-
                     headers: {
-                        "Content-Type":
-                            "application/json",
-
-                        "Authorization":
-                            "Bearer " + authToken
+                        "Content-Type": "application/json",
+                        "Authorization": "Bearer " + authToken
                     },
-
-                    body: JSON.stringify({
-                        message: text
-                    })
+                    body: JSON.stringify({ message: text })
                 }
             );
+
+            if (!streamResponse.ok || !streamResponse.body) {
+
+                throw new Error("Stream endpoint unavailable");
             }
 
-    if (!response.ok) {
+            const reader = streamResponse.body.getReader();
+            const decoder = new TextDecoder();
+            let buffer = "";
 
-        throw new Error(
-            "Backend returned status " +
-            response.status
-        );
-    }
+            while (true) {
 
-    const data =
-        await response.json();
+                const { done, value } = await reader.read();
 
-    typing.remove();
+                if (done) {
+                    break;
+                }
 
-    if (data.success) {
+                buffer += decoder.decode(value, { stream: true });
 
-        createMessage(
-            data.response,
-            "ai"
-        );
+                const lines = buffer.split("\n");
 
-    } else {
+                buffer = lines.pop();
 
-        createMessage(
-            "Backend error: " +
-            (
-                data.error ||
-                "Unknown error"
-            ),
-            "ai"
-        );
-    }
+                for (const line of lines) {
+
+                    if (!line.startsWith("data: ")) {
+                        continue;
+                    }
+
+                    try {
+
+                        const parsed = JSON.parse(line.slice(6));
+
+                        if (parsed.chunk) {
+
+                            accumulatedText += parsed.chunk;
+
+                            aiMessageDiv.innerHTML = formatMessage(accumulatedText);
+
+                            scrollToBottom();
+
+                            streamingWorked = true;
+                        }
+
+                        if (parsed.error) {
+
+                            throw new Error(parsed.error);
+                        }
+
+                    } catch (parseErr) {
+                        // skip malformed chunk
+                    }
+                }
+            }
+
+        } catch (streamError) {
+
+            console.error("Streaming failed, falling back:", streamError);
+
+            try {
+
+                const fallbackResponse = await fetch(
+                    BACKEND_URL + "/api/chat",
+                    {
+                        method: "POST",
+                        headers: {
+                            "Content-Type": "application/json",
+                            "Authorization": "Bearer " + authToken
+                        },
+                        body: JSON.stringify({ message: text })
+                    }
+                );
+
+                const fallbackData = await fallbackResponse.json();
+
+                if (fallbackData.success) {
+
+                    aiMessageDiv.innerHTML = formatMessage(fallbackData.response);
+
+                } else {
+
+                    aiMessageDiv.innerHTML =
+                        formatMessage("❌ " + (fallbackData.error || "Unknown error"));
+                }
+
+            } catch (fallbackError) {
+
+                aiMessageDiv.innerHTML =
+                    formatMessage("❌ NANI AI could not process the request.");
+            }
+        }
+
+        selectedImage = null;
+        imageInput.value = "";
+        scrollToBottom();
+        return;
+            }
 
 } catch (error) {
 
