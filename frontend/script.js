@@ -25,6 +25,100 @@ const welcomeScreen = document.getElementById("welcomeScreen");
 const quickButtons = document.querySelectorAll(".quick-btn");
 const micBtn = document.getElementById("micBtn");
 /* =========================================
+VOICE INPUT
+========================================= */
+
+(function() {
+
+    const SpeechRecognition =
+        window.SpeechRecognition || window.webkitSpeechRecognition;
+
+    if (!SpeechRecognition) {
+
+        if (micBtn) {
+
+            micBtn.addEventListener("click", function() {
+
+                createMessage(
+                    "Voice input isn't supported in this browser.",
+                    "ai"
+                );
+            });
+        }
+
+        return;
+    }
+
+    const recognition = new SpeechRecognition();
+
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = "en-US";
+
+    let isListening = false;
+
+    if (micBtn) {
+
+        micBtn.addEventListener("click", function() {
+
+            if (isListening) {
+
+                recognition.stop();
+
+                return;
+            }
+
+            recognition.start();
+        });
+    }
+
+    recognition.onstart = function() {
+
+        isListening = true;
+
+        if (micBtn) {
+
+            micBtn.textContent = "🔴";
+        }
+    };
+
+    recognition.onend = function() {
+
+        isListening = false;
+
+        if (micBtn) {
+
+            micBtn.textContent = "🎤";
+        }
+    };
+
+    recognition.onresult = function(event) {
+
+        const transcript =
+            event.results[0][0].transcript;
+
+        messageInput.value = transcript;
+
+        messageInput.focus();
+    };
+
+    recognition.onerror = function(event) {
+
+        isListening = false;
+
+        if (micBtn) {
+
+            micBtn.textContent = "🎤";
+        }
+
+        createMessage(
+            "Voice input error: " + event.error,
+            "ai"
+        );
+    };
+
+})();
+/* =========================================
 AUTH
 ========================================= */
 
@@ -644,3 +738,61 @@ if (chatArea) {
 }
 
 }
+/* =========================================
+MATRIX BACKGROUND EFFECT
+========================================= */
+
+(function() {
+
+    const canvas = document.getElementById("matrixCanvas");
+
+    if (!canvas) {
+        return;
+    }
+
+    const ctx = canvas.getContext("2d");
+
+    function resizeCanvas() {
+        canvas.width = window.innerWidth;
+        canvas.height = window.innerHeight;
+    }
+
+    resizeCanvas();
+    window.addEventListener("resize", resizeCanvas);
+
+    const characters = "01";
+    const fontSize = 16;
+    let columns = Math.floor(canvas.width / fontSize);
+    let drops = new Array(columns).fill(1);
+
+    function draw() {
+
+        ctx.fillStyle = "rgba(0, 0, 0, 0.08)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.fillStyle = "#00ff66";
+        ctx.font = fontSize + "px monospace";
+
+        for (let i = 0; i < drops.length; i++) {
+
+            const text =
+                characters.charAt(
+                    Math.floor(Math.random() * characters.length)
+                );
+
+            ctx.fillText(text, i * fontSize, drops[i] * fontSize);
+
+            if (
+                drops[i] * fontSize > canvas.height &&
+                Math.random() > 0.975
+            ) {
+                drops[i] = 0;
+            }
+
+            drops[i]++;
+        }
+    }
+
+    setInterval(draw, 50);
+
+})();
