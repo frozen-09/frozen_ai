@@ -510,8 +510,10 @@ async function askGemini(history) {
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" +
         process.env.GEMINI_API_KEY;
 
+    const recentHistory =
+        history.slice(-20);
 
-    const geminiHistory = history.map(
+    const geminiHistory = recentHistory.map(
         (message) => ({
 
             role:
@@ -657,11 +659,13 @@ async function askOpenRouter(history) {
         2
     );
 
+const recentHistory =
+    history.slice(-20);
+
 const messages = [
 
     {
         role: "system",
-
         content:
             NANI_PERSONALITY +
             "\n\nLONG-TERM USER MEMORY:\n" +
@@ -671,7 +675,7 @@ const messages = [
 
     },
 
-    ...history
+    ...recentHistory
 
 ];
 
