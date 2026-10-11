@@ -24,6 +24,9 @@ const newChatBtn = document.getElementById("newChatBtn");
 const welcomeScreen = document.getElementById("welcomeScreen");
 const quickButtons = document.querySelectorAll(".quick-btn");
 const micBtn = document.getElementById("micBtn");
+
+
+
 /* =========================================
 VOICE INPUT
 ========================================= */
@@ -36,16 +39,10 @@ VOICE INPUT
     if (!SpeechRecognition) {
 
         if (micBtn) {
-
             micBtn.addEventListener("click", function() {
-
-                createMessage(
-                    "Voice input isn't supported in this browser.",
-                    "ai"
-                );
+                createMessage("Voice input isn't supported in this browser.", "ai");
             });
         }
-
         return;
     }
 
@@ -62,59 +59,40 @@ VOICE INPUT
         micBtn.addEventListener("click", function() {
 
             if (isListening) {
-
                 recognition.stop();
-
                 return;
             }
 
-            recognition.start();
+            try {
+                recognition.start();
+            } catch (e) {
+                /* prevents InvalidStateError on double-tap */
+            }
         });
     }
 
     recognition.onstart = function() {
-
         isListening = true;
-
-        if (micBtn) {
-
-            micBtn.textContent = "🔴";
-        }
+        if (micBtn) micBtn.classList.add("active");   // ← turns orb red + pulse
     };
 
     recognition.onend = function() {
-
         isListening = false;
-
-        if (micBtn) {
-
-            micBtn.textContent = "🎤";
-        }
+        if (micBtn) micBtn.classList.remove("active"); // ← restores orb
     };
 
     recognition.onresult = function(event) {
-
-        const transcript =
-            event.results[0][0].transcript;
-
-        messageInput.value = transcript;
-
+        messageInput.value = event.results[0][0].transcript;
         messageInput.focus();
     };
 
     recognition.onerror = function(event) {
-
         isListening = false;
+        if (micBtn) micBtn.classList.remove("active");
 
-        if (micBtn) {
-
-            micBtn.textContent = "🎤";
+        if (event.error !== "aborted") {   // don't scare user when they tap stop
+            createMessage("Voice input error: " + event.error, "ai");
         }
-
-        createMessage(
-            "Voice input error: " + event.error,
-            "ai"
-        );
     };
 
 })();
@@ -234,7 +212,6 @@ const imageInput = document.createElement("input");
 
 imageInput.type = "file";
 imageInput.accept = "image/*";
-imageInput.setAttribute("capture", "environment");
 imageInput.style.display = "none";
 
 document.body.appendChild(imageInput);
@@ -246,20 +223,22 @@ IMAGE BUTTON
 const imageBtn = document.createElement("button");
 
 imageBtn.type = "button";
-imageBtn.className = "icon-btn";
-imageBtn.textContent = "📷";
+imageBtn.className = "orb-btn img-btn";
 imageBtn.title = "Analyze an image";
+imageBtn.innerHTML = `
+    <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+         stroke="currentColor" stroke-width="2"
+         stroke-linecap="round" stroke-linejoin="round">
+        <rect x="3" y="3" width="18" height="18" rx="2"/>
+        <circle cx="8.5" cy="8.5" r="1.5"/>
+        <polyline points="21 15 16 10 5 21"/>
+    </svg>
+    <span class="orb-ring"></span>`;
 
 if (micBtn) {
-micBtn.parentNode.insertBefore(
-imageBtn,
-micBtn
-);
+    micBtn.parentNode.insertBefore(imageBtn, micBtn);
 } else {
-sendBtn.parentNode.insertBefore(
-imageBtn,
-sendBtn
-);
+    sendBtn.parentNode.insertBefore(imageBtn, sendBtn);
 }
 
 imageBtn.addEventListener(
@@ -275,6 +254,64 @@ SELECTED IMAGE
 
 let selectedImage = null;
 
+/* =========================================
+CAMERA — LIVE PREVIEW + CAPTURE & ANALYZE
+========================================= */
+
+const cameraBtn     = document.getElementById("cameraBtn");
+const camModal      = document.getElementById("camModal");
+const camVideo      = document.getElementById("camVideo");
+const camCloseBtn   = document.getElementById("camCloseBtn");
+const camCaptureBtn = document.getElementById("camCaptureBtn");
+
+let camStream = null;
+
+async function openCamera() {
+    try {
+        camStream = await navigator.mediaDevices.getUserMedia({ video: true });
+        camVideo.srcObject = camStream;
+        camModal.classList.remove("hidden");
+        cameraBtn.classList.add("active");
+    } catch (err) {
+        createMessage("Camera access denied or unavailable.", "ai");
+    }
+}
+
+function closeCamera() {
+    if (camStream) {
+        camStream.getTracks().forEach(function(t) { t.stop(); });
+        camStream = null;
+    }
+    camModal.classList.add("hidden");
+    cameraBtn.classList.remove("active");
+}
+
+function captureAndAnalyze() {
+    if (!camStream || !camVideo.videoWidth) return;
+
+    const c = document.createElement("canvas");
+    c.width  = camVideo.videoWidth;
+    c.height = camVideo.videoHeight;
+    c.getContext("2d").drawImage(camVideo, 0, 0);
+
+    c.toBlob(function(blob) {
+        if (!blob) return;
+
+        selectedImage = new File([blob], "camera-capture.jpg", { type: "image/jpeg" });
+
+        createMessage("📷 Captured — press send to analyze", "user");
+        closeCamera();
+        messageInput.focus();
+    }, "image/jpeg", 0.9);
+}
+
+if (cameraBtn) {
+    cameraBtn.addEventListener("click", function() {
+        camStream ? closeCamera() : openCamera();
+    });
+}
+if (camCloseBtn)   camCloseBtn.addEventListener("click", closeCamera);
+if (camCaptureBtn) camCaptureBtn.addEventListener("click", captureAndAnalyze);
 imageInput.addEventListener(
 "change",
 function() {
@@ -450,7 +487,7 @@ try {
     typing.remove();
 
     createMessage(
-        "❌ NANI AI could not process the request.",
+        "❌ Error: " + error.message,
         "ai"
     );
 }
@@ -471,6 +508,20 @@ function fileToBase64(file) {
 return new Promise(
     function(resolve, reject) {
 
+        if (!file || file.size === 0) {
+
+            reject(new Error("Selected file is empty or invalid."));
+
+            return;
+        }
+
+        if (file.size > 8 * 1024 * 1024) {
+
+            reject(new Error("Image is too large. Please choose a photo under 8MB."));
+
+            return;
+        }
+
         const reader =
             new FileReader();
 
@@ -483,9 +534,13 @@ return new Promise(
             };
 
         reader.onerror =
-            function(error) {
+            function() {
 
-                reject(error);
+                reject(new Error(
+                    reader.error
+                        ? reader.error.message
+                        : "Could not read the selected file."
+                ));
             };
 
         reader.readAsDataURL(file);
@@ -696,33 +751,20 @@ messageInput.addEventListener(
 /* =========================================
 QUICK ACTIONS
 ========================================= */
+quickButtons.forEach(function(button) {
 
-quickButtons.forEach(
-function(button) {
+    button.addEventListener("click", function() {
 
-    button.addEventListener(
-        "click",
-        function() {
+        const label = button.querySelector(
+            "span:not(.qb-icon):not(.qb-bracket)"
+        );
 
-            const span =
-                button.querySelector(
-                    "span"
-                );
+        if (!label) return;
 
-            if (!span) {
-                return;
-            }
-
-            messageInput.value =
-                "Tell me about " +
-                span.textContent;
-
-            messageInput.focus();
-        }
-    );
-}
-
-);
+        messageInput.value = "Tell me about " + label.textContent.trim();
+        messageInput.focus();
+    });
+});
 
 /* =========================================
 SCROLL
@@ -794,5 +836,39 @@ MATRIX BACKGROUND EFFECT
     }
 
     setInterval(draw, 50);
+
+})();
+
+/* =========================================
+TERMINAL TYPING EFFECT (welcome subtitle)
+========================================= */
+
+(function() {
+
+    const subtitle = document.querySelector(".welcome p");
+
+    if (!subtitle) {
+        return;
+    }
+
+    const fullText = subtitle.textContent;
+
+    subtitle.textContent = "";
+
+    let i = 0;
+
+    function typeChar() {
+
+        if (i < fullText.length) {
+
+            subtitle.textContent += fullText.charAt(i);
+
+            i++;
+
+            setTimeout(typeChar, 35);
+        }
+    }
+
+    typeChar();
 
 })();
