@@ -653,6 +653,111 @@ app.get("/api/health", (req, res) => {
 // GEMINI
 // =========================================
 
+
+async function askGeminiStream(history, res) {
+
+    const url =
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=" +
+        process.env.GEMINI_API_KEY;
+
+    const geminiHistory = history.map(
+        (message) => ({
+            role: message.role === "assistant" ? "model" : "user",
+            parts: [{ text: message.content }]
+        })
+    );
+
+    const profileText =
+        JSON.stringify(userProfile, null, 2);
+
+    const contents = [
+        {
+            role: "user",
+            parts: [{
+                text:
+                    NANI_PERSONALITY +
+                    "\n\nLONG-TERM USER MEMORY:\n" +
+                    profileText +
+                    "\n\nUse this memory when relevant. Do not reveal private credentials."
+            }]
+        },
+        ...geminiHistory
+    ];
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: contents })
+    });
+
+    if (!response.ok) {
+
+        throw new Error("Gemini stream failed: " + response.status);
+    }
+
+    let fullText = "";
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+
+        const { done, value } = await reader.read();
+
+        if (done) {
+            break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+
+        buffer = lines.pop();
+
+        for (const line of lines) {
+
+            if (!line.startsWith("data: ")) {
+                continue;
+            }
+
+            const jsonStr = line.slice(6).trim();
+
+            if (!jsonStr || jsonStr === "[DONE]") {
+                continue;
+            }
+
+            try {
+
+                const parsed = JSON.parse(jsonStr);
+
+                const chunk =
+                    parsed.candidates &&
+                    parsed.candidates[0] &&
+                    parsed.candidates[0].content &&
+                    parsed.candidates[0].content.parts &&
+                    parsed.candidates[0].content.parts[0] &&
+                    parsed.candidates[0].content.parts[0].text;
+
+                if (chunk) {
+
+                    fullText += chunk;
+
+                    res.write(
+                        "data: " + JSON.stringify({ chunk: chunk }) + "\n\n"
+                    );
+                }
+
+            } catch (parseErr) {
+                // Skip malformed chunks
+            }
+        }
+    }
+
+    return fullText;
+}
+
+
 async function askGemini(history) {
 
     const url =
@@ -1964,6 +2069,61 @@ updateProfileFromMessage(userMessage,userProfile);
 
     }
 );
+
+
+// =========================================
+// STREAMING CHAT API
+// =========================================
+
+app.post(
+    "/api/chat/stream",
+    apiLimiter,
+    requireAuth,
+    async (req, res) => {
+
+        const userMessage = req.body.message;
+
+        if (!userMessage || typeof userMessage !== "string" || userMessage.trim().length === 0) {
+
+            return res.status(400).json({ success: false, error: "Message cannot be empty." });
+        }
+
+        if (userMessage.length > 8000) {
+
+            return res.status(400).json({ success: false, error: "Message is too long." });
+        }
+
+        res.setHeader("Content-Type", "text/event-stream");
+        res.setHeader("Cache-Control", "no-cache");
+        res.setHeader("Connection", "keep-alive");
+        res.flushHeaders();
+
+        conversationHistory.push({ role: "user", content: userMessage });
+        updateProfileFromMessage(userMessage, userProfile);
+
+        try {
+
+            const answer = await askGeminiStream(conversationHistory, res);
+
+            conversationHistory.push({ role: "assistant", content: answer });
+            saveMemory(conversationHistory);
+
+            res.write("data: " + JSON.stringify({ done: true, provider: "Gemini" }) + "\n\n");
+            res.end();
+
+        } catch (error) {
+
+            logError("Streaming chat failed", error);
+
+            conversationHistory.pop();
+
+            res.write("data: " + JSON.stringify({ error: "Streaming failed. Try again." }) + "\n\n");
+            res.end();
+        }
+    }
+);
+
+
 
 // =========================================
 // MEMORY MANAGEMENT API
