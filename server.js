@@ -62,6 +62,7 @@ function logError(message, error) {
 const REQUIRED_ENV_VARS = [
     "GEMINI_API_KEY",
     "OPENROUTER_API_KEY",
+"VIRUSTOTAL_API_KEY",
     "JWT_SECRET"
 ];
 
@@ -1649,6 +1650,95 @@ async function lookupCVE(cveId) {
 
     };
 }
+
+
+
+async function scanUrlVirusTotal(targetUrl) {
+
+    const submitResponse = await fetch(
+        "https://www.virustotal.com/api/v3/urls",
+        {
+            method: "POST",
+            headers: {
+                "x-apikey": process.env.VIRUSTOTAL_API_KEY,
+                "Content-Type": "application/x-www-form-urlencoded"
+            },
+            body: "url=" + encodeURIComponent(targetUrl)
+        }
+    );
+
+    if (!submitResponse.ok) {
+
+        throw new Error("VirusTotal submission failed: " + submitResponse.status);
+    }
+
+    const submitData = await submitResponse.json();
+
+    const analysisId = submitData.data.id;
+
+    const resultResponse = await fetch(
+        "https://www.virustotal.com/api/v3/analyses/" + analysisId,
+        {
+            headers: { "x-apikey": process.env.VIRUSTOTAL_API_KEY }
+        }
+    );
+
+    if (!resultResponse.ok) {
+
+        throw new Error("VirusTotal result fetch failed: " + resultResponse.status);
+    }
+
+    const resultData = await resultResponse.json();
+
+    const stats = resultData.data.attributes.stats;
+
+    return {
+
+        url: targetUrl,
+
+        malicious: stats.malicious,
+
+        suspicious: stats.suspicious,
+
+        harmless: stats.harmless,
+
+        undetected: stats.undetected,
+
+        status: resultData.data.attributes.status
+
+    };
+}
+
+
+app.post(
+    "/api/tools/virustotal",
+    requireAuth,
+    apiLimiter,
+    async (req, res) => {
+
+        const targetUrl = req.body.url;
+
+        if (!targetUrl || typeof targetUrl !== "string") {
+
+            return res.status(400).json({ success: false, error: "url is required." });
+        }
+
+        try {
+
+            const result = await scanUrlVirusTotal(targetUrl);
+
+            res.json({ success: true, result: result });
+
+        } catch (error) {
+
+            logError("VirusTotal scan failed", error);
+
+            res.status(500).json({ success: false, error: "VirusTotal scan failed." });
+        }
+    }
+);
+
+
 
 
 app.get(
