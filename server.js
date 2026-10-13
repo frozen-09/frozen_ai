@@ -1600,6 +1600,102 @@ app.get(
 );
 
 
+
+// =========================================
+// SECURITY TOOL APIS
+// =========================================
+
+async function lookupCVE(cveId) {
+
+    const cleanId = cveId.trim().toUpperCase();
+
+    const url =
+        "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=" + cleanId;
+
+    const response = await fetch(url);
+
+    if (!response.ok) {
+
+        throw new Error("NVD lookup failed: " + response.status);
+    }
+
+    const data = await response.json();
+
+    if (!data.vulnerabilities || data.vulnerabilities.length === 0) {
+
+        return null;
+    }
+
+    const cve = data.vulnerabilities[0].cve;
+
+    const description =
+        cve.descriptions.find(d => d.lang === "en");
+
+    const metrics =
+        cve.metrics && (cve.metrics.cvssMetricV31 || cve.metrics.cvssMetricV30 || cve.metrics.cvssMetricV2);
+
+    const severity =
+        metrics && metrics[0] ? metrics[0].cvssData.baseScore + " (" + (metrics[0].cvssData.baseSeverity || "N/A") + ")" : "N/A";
+
+    return {
+
+        id: cve.id,
+
+        description: description ? description.value : "No description available.",
+
+        severity: severity,
+
+        published: cve.published
+
+    };
+}
+
+
+app.get(
+    "/api/tools/cve/:id",
+    requireAuth,
+    apiLimiter,
+    async (req, res) => {
+
+        try {
+
+            const result = await lookupCVE(req.params.id);
+
+            if (!result) {
+
+                return res.status(404).json({
+
+                    success: false,
+
+                    error: "CVE not found."
+
+                });
+            }
+
+            res.json({
+
+                success: true,
+
+                cve: result
+
+            });
+
+        } catch (error) {
+
+            logError("CVE lookup failed", error);
+
+            res.status(500).json({
+
+                success: false,
+
+                error: "Could not fetch CVE data."
+
+            });
+        }
+    }
+);
+
+
 // =========================================
 // CTF SESSIONS (separate from personal memory)
 // =========================================
@@ -2137,6 +2233,7 @@ app.post(
             res.write("data: " + JSON.stringify({ error: "Both AI providers are currently unavailable." }) + "\n\n");
             res.end();
         }
+});
 
 
 // =========================================
