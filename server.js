@@ -10,6 +10,9 @@ const jwt = require("jsonwebtoken");
 const { DatabaseSync } = require("node:sqlite");
 
 
+// =========================================
+// LOGGING
+// =========================================
 
 function logInfo(message, data) {
 
@@ -17,15 +20,11 @@ function logInfo(message, data) {
         "[" + new Date().toISOString() + "] [INFO] " + message;
 
     if (data !== undefined) {
-
         console.log(line, data);
-
     } else {
-
         console.log(line);
     }
 }
-
 
 function logWarn(message, data) {
 
@@ -33,15 +32,11 @@ function logWarn(message, data) {
         "[" + new Date().toISOString() + "] [WARN] " + message;
 
     if (data !== undefined) {
-
         console.warn(line, data);
-
     } else {
-
         console.warn(line);
     }
 }
-
 
 function logError(message, error) {
 
@@ -49,29 +44,28 @@ function logError(message, error) {
         "[" + new Date().toISOString() + "] [ERROR] " + message;
 
     if (error) {
-
         console.error(line, error.message || error);
-
     } else {
-
         console.error(line);
     }
 }
 
 
+// =========================================
+// REQUIRED ENV VARS
+// =========================================
+
 const REQUIRED_ENV_VARS = [
     "GEMINI_API_KEY",
     "OPENROUTER_API_KEY",
-"VIRUSTOTAL_API_KEY",
-    "JWT_SECRET"
+    "JWT_SECRET",
+    "VIRUSTOTAL_API_KEY"
 ];
 
 const missingVars =
-    REQUIRED_ENV_VARS.filter(
-        function (key) {
-            return !process.env[key] || process.env[key].trim() === "";
-        }
-    );
+    REQUIRED_ENV_VARS.filter(function (key) {
+        return !process.env[key] || process.env[key].trim() === "";
+    });
 
 if (missingVars.length > 0) {
 
@@ -87,21 +81,23 @@ if (missingVars.length > 0) {
     process.exit(1);
 }
 
+
+// =========================================
+// APP SETUP
+// =========================================
+
 const app = express();
 
 app.set("trust proxy", 1);
 
 const PORT = process.env.PORT || 3000;
 const NODE_ENV = process.env.NODE_ENV || "development";
-const MEMORY_FILE = "./memory.json";
-const PROFILE_FILE = "./profile.json";
-const USERS_FILE = "./users.json";
-const USER_DATA_DIR = "./user-data";
-
-
 const DB_FILE = process.env.DB_FILE || "./nani.db";
 
 
+// =========================================
+// DATABASE
+// =========================================
 
 const db = new DatabaseSync(DB_FILE);
 
@@ -114,7 +110,13 @@ db.exec(`
     )
 `);
 
-
+db.exec(`
+    CREATE TABLE IF NOT EXISTS user_data (
+        userId TEXT PRIMARY KEY,
+        conversationHistory TEXT NOT NULL DEFAULT '[]',
+        profile TEXT NOT NULL DEFAULT '{}'
+    )
+`);
 
 db.exec(`
     CREATE TABLE IF NOT EXISTS ctf_sessions (
@@ -132,32 +134,47 @@ db.exec(`
     )
 `);
 
-
-
 db.exec(`
-    CREATE TABLE IF NOT EXISTS user_data (
-        userId TEXT PRIMARY KEY,
-        conversationHistory TEXT NOT NULL DEFAULT '[]',
-        profile TEXT NOT NULL DEFAULT '{}'
-    )
-`);
-
-
-db.exec(`
-    CREATE TABLE IF NOT EXISTS users (
+    CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
-        username TEXT UNIQUE NOT NULL,
-        passwordHash TEXT NOT NULL,
-        createdAt TEXT NOT NULL
+        userId TEXT NOT NULL,
+        title TEXT NOT NULL DEFAULT 'New Chat',
+        messages TEXT NOT NULL DEFAULT '[]',
+        createdAt TEXT NOT NULL,
+        updatedAt TEXT NOT NULL
     )
 `);
 
+db.exec(`
+    CREATE TABLE IF NOT EXISTS authorized_targets (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        target TEXT NOT NULL,
+        authorizationStatement TEXT NOT NULL,
+        isKnownLab INTEGER NOT NULL DEFAULT 0,
+        confirmedAt TEXT NOT NULL,
+        expiresAt TEXT
+    )
+`);
+
+db.exec(`
+    CREATE TABLE IF NOT EXISTS ctf_files (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        sessionId TEXT NOT NULL,
+        filename TEXT NOT NULL,
+        mimeType TEXT,
+        sizeBytes INTEGER NOT NULL,
+        dataBase64 TEXT NOT NULL,
+        uploadedAt TEXT NOT NULL
+    )
+`);
 
 console.log("Database ready:", DB_FILE);
 
 
 // =========================================
-// NANI AI PERSONALITY
+// PERSONALITIES
 // =========================================
 
 const NANI_PERSONALITY = `
@@ -186,63 +203,67 @@ If the user asks who you are, identify yourself as NANI AI.
 Keep answers reasonably concise unless the user asks for detailed information.
 `;
 
+const CTF_PERSONALITY = `
+You are NANI AI operating in CTF (Capture The Flag) assistant mode.
+
+Your role: help the user analyze CTF challenges in authorized environments only (CTF competitions, training labs, their own systems). Never assist with attacks on real-world targets without explicit authorization context.
+
+Your approach:
+1. If the challenge category is unclear, ask clarifying questions before diving in.
+2. Identify the likely vulnerability class or technique category (web, crypto, forensics, reverse engineering, malware, OSINT, steganography, mobile, binary exploitation, misc).
+3. Build a clear hypothesis before suggesting actions.
+4. Recommend specific tools (e.g. Burp Suite, Wireshark, Ghidra, pwntools) and explain commands before the user runs them — never just dump a command with no explanation.
+5. When the user shares command output, analyze it carefully and connect it to the hypothesis.
+6. Track discovered clues and avoid repeating approaches that already failed — refer back to what's already been tried in this session.
+7. Help build a structured path toward the solution, not just isolated answers.
+8. If the user shares a candidate flag, help validate it against the expected format (e.g. flag{...}, CTF{...}) but never fabricate a flag.
+9. Once solved, explain the full solution clearly and how each step connected.
+
+Stay technical, precise, and practical. Assume the user has some technical background but explain non-obvious tools or concepts.
+
+TOOL GUIDANCE (explain and recommend only — you do not execute tools yourself):
+
+Burp Suite: Guide the user through intercepting requests in the Proxy tab, using Repeater to modify and resend requests, Intruder for automated parameter fuzzing, and Decoder for encoding/decoding payloads. When they paste a request/response, analyze headers, cookies, parameters, and any reflected input for injection points.
+
+Nmap: Recommend specific scan types based on their goal — e.g. "nmap -sV -p- <target>" for full port + version detection, "-sC" for default scripts, "-A" for aggressive OS/service detection. Explain what each flag does before suggesting it. When they paste scan output, identify open ports, likely services, and what each might mean for the challenge.
+
+Metasploit: Explain module selection (search, use, show options, set RHOSTS, etc.) conceptually and help them understand what a given exploit/auxiliary module does before running it. When they share msfconsole output, help interpret success/failure and next steps.
+
+Always explain WHY a tool or command is appropriate for the current hypothesis, not just WHAT to type. If the user pastes raw tool output, read it carefully and connect findings back to the challenge's goal.
+
+Never provide assistance that would only make sense against a real, unauthorized system — always frame guidance around the CTF/lab context.
+`;
+
 
 // =========================================
 // MIDDLEWARE
 // =========================================
+
 const allowedOrigins = [
     "http://127.0.0.1:3000",
     "http://localhost:3000",
     "http://localhost:8158",
     "http://127.0.0.1:8158",
-"https://nani-ai-frontend.onrender.com"
-
+    "https://nani-ai-frontend.onrender.com"
 ];
 
 app.use(helmet());
 
-
 const authLimiter = rateLimit({
-
     windowMs: 15 * 60 * 1000,
-
     max: 10,
-
-    message: {
-
-        success: false,
-
-        error: "Too many attempts. Please try again in 15 minutes."
-
-    },
-
+    message: { success: false, error: "Too many attempts. Please try again in 15 minutes." },
     standardHeaders: true,
-
     legacyHeaders: false
-
 });
-
 
 const apiLimiter = rateLimit({
-
     windowMs: 60 * 1000,
-
     max: 30,
-
-    message: {
-
-        success: false,
-
-        error: "Too many requests. Please slow down."
-
-    },
-
+    message: { success: false, error: "Too many requests. Please slow down." },
     standardHeaders: true,
-
     legacyHeaders: false
-
 });
-
 
 app.use(cors({
     origin: function (origin, callback) {
@@ -256,115 +277,19 @@ app.use(cors({
 }));
 
 app.use(express.json({ limit: "50mb" }));
+
+
 // =========================================
-// MEMORY
+// USER FUNCTIONS
 // =========================================
-
-function loadMemory() {
-
-    try {
-
-        if (!fs.existsSync(MEMORY_FILE)) {
-            fs.writeFileSync(MEMORY_FILE, "[]");
-        }
-
-        const data =
-            fs.readFileSync(
-                MEMORY_FILE,
-                "utf8"
-            );
-
-        return JSON.parse(data || "[]");
-
-    } catch (error) {
-
-        console.log(
-            "Memory load error:",
-            error.message
-        );
-
-        return [];
-
-    }
-}
-
-
-function saveMemory(memory) {
-
-    fs.writeFileSync(
-        MEMORY_FILE,
-        JSON.stringify(
-            memory,
-            null,
-            2
-        )
-    );
-
-}
-
-
-let conversationHistory = loadMemory();
-// =========================================
-// LONG-TERM PROFILE MEMORY
-// =========================================
-
-function loadProfile() {
-
-    try {
-
-        if (!fs.existsSync(PROFILE_FILE)) {
-            fs.writeFileSync(
-                PROFILE_FILE,
-                "{}"
-            );
-        }
-
-        const data =
-            fs.readFileSync(
-                PROFILE_FILE,
-                "utf8"
-            );
-
-        return JSON.parse(
-            data || "{}"
-        );
-
-    } catch (error) {
-
-        console.log(
-            "Profile load error:",
-            error.message
-        );
-
-        return {};
-    }
-}
-
-
-function saveProfile(profile) {
-
-    fs.writeFileSync(
-        PROFILE_FILE,
-        JSON.stringify(
-            profile,
-            null,
-            2
-        )
-    );
-}
-
-
-let userProfile = loadProfile();
 
 function findUserByUsername(username) {
 
     const row =
-        db.prepare("SELECT * FROM users WHERE username = ?")
-            .get(username);
+        db.prepare("SELECT * FROM users WHERE username = ?").get(username);
 
     return row || null;
 }
-
 
 function createUser(id, username, passwordHash, createdAt) {
 
@@ -372,43 +297,92 @@ function createUser(id, username, passwordHash, createdAt) {
         "INSERT INTO users (id, username, passwordHash, createdAt) VALUES (?, ?, ?, ?)"
     ).run(id, username, passwordHash, createdAt);
 }
+
+
+// =========================================
+// PER-USER DATA (chat history + profile)
+// =========================================
+
 function loadUserData(userId) {
 
     const row =
-        db.prepare("SELECT * FROM user_data WHERE userId = ?")
-            .get(userId);
-
+        db.prepare("SELECT * FROM user_data WHERE userId = ?").get(userId);
 
     if (!row) {
 
-        return {
-
-            conversationHistory: [],
-
-            profile: {}
-
-        };
+        return { conversationHistory: [], profile: {} };
     }
 
-
     return {
-
-        conversationHistory:
-            JSON.parse(row.conversationHistory),
-
-        profile:
-            JSON.parse(row.profile)
-
+        conversationHistory: JSON.parse(row.conversationHistory),
+        profile: JSON.parse(row.profile)
     };
 }
 
+function saveUserData(userId, userData) {
+
+    const conversationJson = JSON.stringify(userData.conversationHistory);
+    const profileJson = JSON.stringify(userData.profile);
+
+    db.prepare(`
+        INSERT INTO user_data (userId, conversationHistory, profile)
+        VALUES (?, ?, ?)
+        ON CONFLICT(userId) DO UPDATE SET
+            conversationHistory = excluded.conversationHistory,
+            profile = excluded.profile
+    `).run(userId, conversationJson, profileJson);
+}
+
+function updateProfileFromMessage(userMessage, userProfile) {
+
+    const text = userMessage.trim();
+
+    const nameMatch =
+        text.match(/(?:my name is|i am|i'm)\s+([a-zA-Z][a-zA-Z ]{1,30})/i);
+
+    if (nameMatch) {
+
+        userProfile.name = nameMatch[1].trim();
+        logInfo("Memory updated: name = " + userProfile.name);
+    }
+
+    const interestMatch =
+        text.match(/(?:i like|i love|i am interested in|my interest is)\s+(.+)/i);
+
+    if (interestMatch) {
+
+        const interest = interestMatch[1].trim();
+
+        if (!userProfile.interests) {
+            userProfile.interests = [];
+        }
+
+        if (!userProfile.interests.includes(interest)) {
+
+            userProfile.interests.push(interest);
+            logInfo("Memory updated: interest = " + interest);
+        }
+    }
+
+    const languageMatch =
+        text.match(/(?:my favorite programming language is|my favourite programming language is)\s+([a-zA-Z0-9+#]+)/i);
+
+    if (languageMatch) {
+
+        userProfile.favorite_language = languageMatch[1].trim();
+        logInfo("Memory updated: favorite language = " + userProfile.favorite_language);
+    }
+}
+
+
+// =========================================
+// CTF SESSIONS
+// =========================================
+
 function createCtfSession(userId, challengeName, category, description) {
 
-    const id =
-        Date.now().toString();
-
-    const now =
-        new Date().toISOString();
+    const id = Date.now().toString();
+    const now = new Date().toISOString();
 
     db.prepare(`
         INSERT INTO ctf_sessions
@@ -418,7 +392,6 @@ function createCtfSession(userId, challengeName, category, description) {
 
     return id;
 }
-
 
 function listCtfSessions(userId) {
 
@@ -430,66 +403,43 @@ function listCtfSessions(userId) {
     `).all(userId);
 }
 
-
 function getCtfSession(userId, sessionId) {
 
     const row =
-        db.prepare(`
-            SELECT * FROM ctf_sessions
-            WHERE id = ? AND userId = ?
-        `).get(sessionId, userId);
+        db.prepare(`SELECT * FROM ctf_sessions WHERE id = ? AND userId = ?`)
+            .get(sessionId, userId);
 
     if (!row) {
         return null;
     }
 
     return {
-
         id: row.id,
-
         challengeName: row.challengeName,
-
         category: row.category,
-
         description: row.description,
-
         clues: JSON.parse(row.clues),
-
         failedApproaches: JSON.parse(row.failedApproaches),
-
         chatHistory: JSON.parse(row.chatHistory),
-
         status: row.status,
-
         createdAt: row.createdAt,
-
         updatedAt: row.updatedAt
-
     };
 }
 
-
 function updateCtfSession(userId, sessionId, updates) {
 
-    const session =
-        getCtfSession(userId, sessionId);
+    const session = getCtfSession(userId, sessionId);
 
     if (!session) {
         return false;
     }
 
-    const merged = {
-        ...session,
-        ...updates
-    };
+    const merged = { ...session, ...updates };
 
     db.prepare(`
         UPDATE ctf_sessions
-        SET clues = ?,
-            failedApproaches = ?,
-            chatHistory = ?,
-            status = ?,
-            updatedAt = ?
+        SET clues = ?, failedApproaches = ?, chatHistory = ?, status = ?, updatedAt = ?
         WHERE id = ? AND userId = ?
     `).run(
         JSON.stringify(merged.clues),
@@ -504,121 +454,224 @@ function updateCtfSession(userId, sessionId, updates) {
     return true;
 }
 
-
 function deleteCtfSession(userId, sessionId) {
 
     const result =
-        db.prepare(`
-            DELETE FROM ctf_sessions
-            WHERE id = ? AND userId = ?
-        `).run(sessionId, userId);
+        db.prepare(`DELETE FROM ctf_sessions WHERE id = ? AND userId = ?`)
+            .run(sessionId, userId);
 
     return result.changes > 0;
 }
 
 
+// =========================================
+// CONVERSATIONS (multiple chat threads)
+// =========================================
 
-function saveUserData(userId, userData) {
+function createConversation(userId, title) {
 
-    const conversationJson =
-        JSON.stringify(userData.conversationHistory);
-
-    const profileJson =
-        JSON.stringify(userData.profile);
-
+    const id = Date.now().toString();
+    const now = new Date().toISOString();
 
     db.prepare(`
-        INSERT INTO user_data (userId, conversationHistory, profile)
-        VALUES (?, ?, ?)
-        ON CONFLICT(userId) DO UPDATE SET
-            conversationHistory = excluded.conversationHistory,
-            profile = excluded.profile
-    `).run(userId, conversationJson, profileJson);
+        INSERT INTO conversations (id, userId, title, messages, createdAt, updatedAt)
+        VALUES (?, ?, ?, '[]', ?, ?)
+    `).run(id, userId, title || "New Chat", now, now);
+
+    return id;
+}
+
+function listConversations(userId) {
+
+    return db.prepare(`
+        SELECT id, title, createdAt, updatedAt
+        FROM conversations
+        WHERE userId = ?
+        ORDER BY updatedAt DESC
+    `).all(userId);
+}
+
+function getConversation(userId, conversationId) {
+
+    const row =
+        db.prepare(`SELECT * FROM conversations WHERE id = ? AND userId = ?`)
+            .get(conversationId, userId);
+
+    if (!row) {
+        return null;
+    }
+
+    return {
+        id: row.id,
+        title: row.title,
+        messages: JSON.parse(row.messages),
+        createdAt: row.createdAt,
+        updatedAt: row.updatedAt
+    };
+}
+
+function saveConversationMessages(userId, conversationId, messages) {
+
+    db.prepare(`
+        UPDATE conversations SET messages = ?, updatedAt = ?
+        WHERE id = ? AND userId = ?
+    `).run(JSON.stringify(messages), new Date().toISOString(), conversationId, userId);
+}
+
+function deleteConversation(userId, conversationId) {
+
+    const result =
+        db.prepare(`DELETE FROM conversations WHERE id = ? AND userId = ?`)
+            .run(conversationId, userId);
+
+    return result.changes > 0;
+}
+
+function renameConversation(userId, conversationId, newTitle) {
+
+    const result =
+        db.prepare(`UPDATE conversations SET title = ? WHERE id = ? AND userId = ?`)
+            .run(newTitle, conversationId, userId);
+
+    return result.changes > 0;
 }
 
 
 // =========================================
-// UPDATE LONG-TERM MEMORY
+// AUTHORIZED TARGETS
 // =========================================
 
-function updateProfileFromMessage(userMessage,userProfile) {
+const KNOWN_LAB_DOMAINS = [
+    "tryhackme.com",
+    "hackthebox.com",
+    "hackthebox.eu",
+    "picoctf.org",
+    "overthewire.org",
+    "portswigger.net",
+    "dvwa.co.uk",
+    "bwapp.me",
+    "vulnweb.com",
+    "testphp.vulnweb.com",
+    "hacker101.com",
+    "ctftime.org"
+];
 
-    const text = userMessage.trim();
+function isKnownLabDomain(target) {
 
-    // Remember user's name
-    const nameMatch =
-        text.match(
-            /(?:my name is|i am|i'm)\s+([a-zA-Z][a-zA-Z ]{1,30})/i
-        );
+    const lower = target.toLowerCase();
 
-    if (nameMatch) {
-
-        userProfile.name =
-            nameMatch[1].trim();
-
-        console.log(
-            "Memory updated: name =",
-            userProfile.name
-        );
-    }
-
-
-    // Remember interests
-    const interestMatch =
-        text.match(
-            /(?:i like|i love|i am interested in|my interest is)\s+(.+)/i
-        );
-
-    if (interestMatch) {
-
-        const interest =
-            interestMatch[1].trim();
-
-        if (!userProfile.interests) {
-            userProfile.interests = [];
-        }
-
-        if (
-            !userProfile.interests
-                .includes(interest)
-        ) {
-
-            userProfile.interests.push(
-                interest
-            );
-
-            console.log(
-                "Memory updated: interest =",
-                interest
-            );
-        }
-    }
-
-
-    // Remember favorite programming language
-    const languageMatch =
-        text.match(
-            /(?:my favorite programming language is|my favourite programming language is)\s+([a-zA-Z0-9+#]+)/i
-        );
-
-    if (languageMatch) {
-
-        userProfile.favorite_language =
-            languageMatch[1].trim();
-
-        console.log(
-            "Memory updated: favorite language =",
-            userProfile.favorite_language
-        );
-    }
-
-
-    // Save only when something changed (caller handles persistence)
+    return KNOWN_LAB_DOMAINS.some(function (lab) {
+        return lower.includes(lab);
+    });
 }
+
+function declareAuthorizedTarget(userId, target, authorizationStatement) {
+
+    const id = Date.now().toString();
+    const now = new Date().toISOString();
+    const knownLab = isKnownLabDomain(target);
+    const expiresAt = new Date(Date.now() + 24 * 60 * 60 * 1000).toISOString();
+
+    db.prepare(`
+        INSERT INTO authorized_targets
+        (id, userId, target, authorizationStatement, isKnownLab, confirmedAt, expiresAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    `).run(id, userId, target.toLowerCase().trim(), authorizationStatement, knownLab ? 1 : 0, now, expiresAt);
+
+    logInfo("Authorized target declared", { userId: userId, target: target, knownLab: knownLab });
+
+    return { id: id, isKnownLab: knownLab, expiresAt: expiresAt };
+}
+
+function getActiveAuthorizedTargets(userId) {
+
+    return db.prepare(`
+        SELECT * FROM authorized_targets
+        WHERE userId = ? AND (expiresAt IS NULL OR expiresAt > ?)
+        ORDER BY confirmedAt DESC
+    `).all(userId, new Date().toISOString());
+}
+
+
 // =========================================
-// TEST
+// CTF FILE UPLOADS
 // =========================================
 
+const MAX_CTF_FILE_SIZE = 15 * 1024 * 1024;
+
+function storeCtfFile(userId, sessionId, filename, mimeType, base64Data) {
+
+    const approxBytes = (base64Data.length * 3) / 4;
+
+    if (approxBytes > MAX_CTF_FILE_SIZE) {
+
+        throw new Error("File too large. Maximum size is 15MB.");
+    }
+
+    const id = Date.now().toString();
+
+    db.prepare(`
+        INSERT INTO ctf_files (id, userId, sessionId, filename, mimeType, sizeBytes, dataBase64, uploadedAt)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(id, userId, sessionId, filename, mimeType || "application/octet-stream", Math.round(approxBytes), base64Data, new Date().toISOString());
+
+    return id;
+}
+
+function listCtfFiles(userId, sessionId) {
+
+    return db.prepare(`
+        SELECT id, filename, mimeType, sizeBytes, uploadedAt
+        FROM ctf_files
+        WHERE userId = ? AND sessionId = ?
+        ORDER BY uploadedAt DESC
+    `).all(userId, sessionId);
+}
+
+function getCtfFile(userId, fileId) {
+
+    return db.prepare(`SELECT * FROM ctf_files WHERE id = ? AND userId = ?`)
+        .get(fileId, userId) || null;
+}
+
+
+// =========================================
+// AUTH MIDDLEWARE
+// =========================================
+
+function requireAuth(req, res, next) {
+
+    const authHeader = req.headers.authorization;
+
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+
+        return res.status(401).json({ success: false, error: "Authentication required." });
+    }
+
+    const token = authHeader.split(" ")[1];
+
+    try {
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        req.user = decoded;
+        next();
+
+    } catch (error) {
+
+        return res.status(401).json({ success: false, error: "Invalid or expired token." });
+    }
+}
+
+
+// =========================================
+// TEST / HEALTH
+// =========================================
+
+app.get("/", (req, res) => {
+
+    res.json({ success: true, message: "NANI AI backend is working!" });
+});
 
 app.get("/api/health", (req, res) => {
 
@@ -633,43 +686,104 @@ app.get("/api/health", (req, res) => {
         dbStatus = "error";
     }
 
-
     res.json({
-
         success: true,
-
         status: "ok",
-
         database: dbStatus,
-
         uptimeSeconds: process.uptime(),
-
         timestamp: new Date().toISOString()
-
     });
-
 });
 
+
 // =========================================
-// GEMINI
+// GEMINI (non-streaming)
 // =========================================
 
+async function askGemini(history, userProfile) {
 
-async function askGeminiStream(history, res) {
+    const url =
+        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" +
+        process.env.GEMINI_API_KEY;
+
+    const recentHistory = history.slice(-20);
+
+    const geminiHistory = recentHistory.map((message) => ({
+        role: message.role === "assistant" ? "model" : "user",
+        parts: [{ text: message.content }]
+    }));
+
+    const profileText = JSON.stringify(userProfile || {}, null, 2);
+
+    const contents = [
+        {
+            role: "user",
+            parts: [{
+                text:
+                    NANI_PERSONALITY +
+                    "\n\nLONG-TERM USER MEMORY:\n" +
+                    profileText +
+                    "\n\nUse this memory when relevant. Do not reveal private credentials."
+            }]
+        },
+        ...geminiHistory
+    ];
+
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: contents })
+    });
+
+    if (!response.ok) {
+
+        let errorMessage = "Gemini request failed";
+
+        try {
+
+            const errorData = await response.json();
+
+            if (errorData.error && errorData.error.message) {
+                errorMessage = errorData.error.message;
+            }
+
+        } catch (parseError) {
+
+            errorMessage = "Gemini HTTP " + response.status;
+        }
+
+        throw new Error("Gemini failed: " + response.status + " - " + errorMessage);
+    }
+
+    const data = await response.json();
+
+    if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
+
+        throw new Error("Gemini returned an invalid response");
+    }
+
+    return data.candidates[0].content.parts[0].text;
+}
+
+
+// =========================================
+// GEMINI (streaming)
+// =========================================
+
+async function askGeminiStream(history, userProfile, res) {
 
     const url =
         "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse&key=" +
         process.env.GEMINI_API_KEY;
 
-    const geminiHistory = history.map(
-        (message) => ({
-            role: message.role === "assistant" ? "model" : "user",
-            parts: [{ text: message.content }]
-        })
-    );
+    const recentHistory = history.slice(-20);
 
-    const profileText =
-        JSON.stringify(userProfile, null, 2);
+    const geminiHistory = recentHistory.map((message) => ({
+        role: message.role === "assistant" ? "model" : "user",
+        parts: [{ text: message.content }]
+    }));
+
+    const profileText = JSON.stringify(userProfile || {}, null, 2);
 
     const contents = [
         {
@@ -713,7 +827,6 @@ async function askGeminiStream(history, res) {
         buffer += decoder.decode(value, { stream: true });
 
         const lines = buffer.split("\n");
-
         buffer = lines.pop();
 
         for (const line of lines) {
@@ -744,13 +857,11 @@ async function askGeminiStream(history, res) {
 
                     fullText += chunk;
 
-                    res.write(
-                        "data: " + JSON.stringify({ chunk: chunk }) + "\n\n"
-                    );
+                    res.write("data: " + JSON.stringify({ chunk: chunk }) + "\n\n");
                 }
 
             } catch (parseErr) {
-                // Skip malformed chunks
+                // skip malformed chunk
             }
         }
     }
@@ -759,274 +870,68 @@ async function askGeminiStream(history, res) {
 }
 
 
-async function askGemini(history) {
-
-    const url =
-        "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent?key=" +
-        process.env.GEMINI_API_KEY;
-
-    const recentHistory =
-        history.slice(-20);
-
-    const geminiHistory = recentHistory.map(
-        (message) => ({
-
-            role:
-                message.role === "assistant"
-                    ? "model"
-                    : "user",
-
-            parts: [
-                {
-                    text: message.content
-                }
-            ]
-
-        })
-    );
-
-
-    const profileText =
-    JSON.stringify(
-        userProfile,
-        null,
-        2
-    );
-
-const contents = [
-
-    {
-        role: "user",
-
-        parts: [
-            {
-                text:
-                    NANI_PERSONALITY +
-                    "\n\nLONG-TERM USER MEMORY:\n" +
-                    profileText +
-                    "\n\nUse this memory when relevant. " +
-                    "Do not reveal private credentials."
-            }
-        ]
-    },
-
-    ...geminiHistory
-
-];
-
-    const response =
-        await fetch(
-            url,
-            {
-
-                method: "POST",
-
-                headers: {
-
-                    "Content-Type":
-                        "application/json"
-
-                },
-
-                body: JSON.stringify({
-
-                    contents: contents
-
-                })
-
-            }
-        );
-
-
-   if (!response.ok) {
-
-    let errorMessage =
-        "Gemini request failed";
-
-    try {
-
-        const errorData =
-            await response.json();
-
-        if (
-            errorData.error &&
-            errorData.error.message
-        ) {
-
-            errorMessage =
-                errorData.error.message;
-
-        }
-
-    } catch (parseError) {
-
-        errorMessage =
-            "Gemini HTTP " +
-            response.status;
-
-    }
-
-    throw new Error(
-        "Gemini failed: " +
-        response.status +
-        " - " +
-        errorMessage
-    );
-
-}
-
-    const data =
-        await response.json();
-
-
-    if (
-        !data.candidates ||
-        !data.candidates[0] ||
-        !data.candidates[0].content
-    ) {
-
-        throw new Error(
-            "Gemini returned an invalid response"
-        );
-
-    }
-
-
-    return data
-        .candidates[0]
-        .content
-        .parts[0]
-        .text;
-
-}
-
-
 // =========================================
 // OPENROUTER FALLBACK
 // =========================================
 
-async function askOpenRouter(history) {
+async function askOpenRouter(history, userProfile) {
 
-    const profileText =
-    JSON.stringify(
-        userProfile,
-        null,
-        2
-    );
+    const profileText = JSON.stringify(userProfile || {}, null, 2);
 
-const recentHistory =
-    history.slice(-20);
+    const recentHistory = history.slice(-20);
 
-const messages = [
+    const messages = [
+        {
+            role: "system",
+            content:
+                NANI_PERSONALITY +
+                "\n\nLONG-TERM USER MEMORY:\n" +
+                profileText +
+                "\n\nUse this memory when relevant. Do not reveal private credentials."
+        },
+        ...recentHistory
+    ];
 
-    {
-        role: "system",
-        content:
-            NANI_PERSONALITY +
-            "\n\nLONG-TERM USER MEMORY:\n" +
-            profileText +
-            "\n\nUse this memory when relevant. " +
-            "Do not reveal private credentials."
-
-    },
-
-    ...recentHistory
-
-];
-
-    const response =
-        await fetch(
-            "https://openrouter.ai/api/v1/chat/completions",
-            {
-
-                method: "POST",
-
-                headers: {
-
-                    "Authorization":
-                        "Bearer " +
-                        process.env.OPENROUTER_API_KEY,
-
-                    "Content-Type":
-                        "application/json"
-
-                },
-
-                body: JSON.stringify({
-
-                    model:
-                        "openrouter/free",
-
-                    messages:
-                        messages
-
-                })
-
-            }
-        );
-
+    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Authorization": "Bearer " + process.env.OPENROUTER_API_KEY,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({ model: "openrouter/free", messages: messages })
+    });
 
     if (!response.ok) {
 
-    let errorMessage =
-        "OpenRouter request failed";
+        let errorMessage = "OpenRouter request failed";
 
-    try {
+        try {
 
-        const errorData =
-            await response.json();
+            const errorData = await response.json();
 
-        if (
-            errorData.error &&
-            errorData.error.message
-        ) {
+            if (errorData.error && errorData.error.message) {
+                errorMessage = errorData.error.message;
+            }
 
-            errorMessage =
-                errorData.error.message;
+        } catch (parseError) {
 
+            errorMessage = "OpenRouter HTTP " + response.status;
         }
 
-    } catch (parseError) {
-
-        errorMessage =
-            "OpenRouter HTTP " +
-            response.status;
-
+        throw new Error("OpenRouter failed: " + response.status + " - " + errorMessage);
     }
 
-    throw new Error(
-        "OpenRouter failed: " +
-        response.status +
-        " - " +
-        errorMessage
-    );
+    const data = await response.json();
 
+    if (!data.choices || !data.choices[0] || !data.choices[0].message) {
+
+        throw new Error("OpenRouter returned an invalid response");
+    }
+
+    return data.choices[0].message.content;
 }
 
 
-    const data =
-        await response.json();
-
-
-    if (
-        !data.choices ||
-        !data.choices[0] ||
-        !data.choices[0].message
-    ) {
-
-        throw new Error(
-            "OpenRouter returned an invalid response"
-        );
-
-    }
-
-
-    return data
-        .choices[0]
-        .message
-        .content;
-
-}
 // =========================================
 // IMAGE AI
 // =========================================
@@ -1039,12 +944,7 @@ async function askGeminiImage(message, imageData) {
 
     const parts = [];
 
-    parts.push({
-        text:
-            NANI_PERSONALITY +
-            "\n\nUser question:\n" +
-            message
-    });
+    parts.push({ text: NANI_PERSONALITY + "\n\nUser question:\n" + message });
 
     parts.push({
         inline_data: {
@@ -1053,400 +953,144 @@ async function askGeminiImage(message, imageData) {
         }
     });
 
-    const response = await fetch(
-        url,
-        {
-            method: "POST",
-
-            headers: {
-                "Content-Type": "application/json"
-            },
-
-            body: JSON.stringify({
-                contents: [
-                    {
-                        role: "user",
-                        parts: parts
-                    }
-                ]
-            })
-        }
-    );
+    const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ contents: [{ role: "user", parts: parts }] })
+    });
 
     if (!response.ok) {
 
-        throw new Error(
-            "Gemini image failed: " +
-            response.status
-        );
+        throw new Error("Gemini image failed: " + response.status);
     }
 
-    const data =
-        await response.json();
+    const data = await response.json();
 
-    if (
-        !data.candidates ||
-        !data.candidates[0] ||
-        !data.candidates[0].content
-    ) {
+    if (!data.candidates || !data.candidates[0] || !data.candidates[0].content) {
 
-        throw new Error(
-            "Gemini image returned invalid response"
-        );
+        throw new Error("Gemini image returned invalid response");
     }
 
-    return data
-        .candidates[0]
-        .content
-        .parts[0]
-        .text;
+    return data.candidates[0].content.parts[0].text;
 }
-
-
-// =========================================
-// IMAGE API
-// =========================================
 
 app.post(
     "/api/image",
-requireAuth,    
-async (req, res) => {
+    requireAuth,
+    apiLimiter,
+    async (req, res) => {
 
-       
-
-        const message =
-            req.body.message ||
-            "Describe this image.";
-
-        const image =
-            req.body.image;
+        const message = req.body.message || "Describe this image.";
+        const image = req.body.image;
 
         if (!image || typeof image !== "string") {
 
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Image is required"
-
-            });
+            return res.status(400).json({ success: false, error: "Image is required" });
         }
 
+        const ALLOWED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp"];
 
-        const ALLOWED_IMAGE_TYPES = [
-            "image/jpeg",
-            "image/png",
-            "image/webp"
-        ];
-
-
-        const mimeMatch =
-            image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
-
+        const mimeMatch = image.match(/^data:(image\/[a-zA-Z0-9.+-]+);base64,/);
 
         if (!mimeMatch) {
 
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Invalid image format."
-
-            });
+            return res.status(400).json({ success: false, error: "Invalid image format." });
         }
-
 
         if (!ALLOWED_IMAGE_TYPES.includes(mimeMatch[1])) {
 
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Unsupported image type. Use JPEG, PNG, or WEBP."
-
-            });
+            return res.status(400).json({ success: false, error: "Unsupported image type. Use JPEG, PNG, or WEBP." });
         }
 
-
-        const approxSizeBytes =
-            (image.length * 3) / 4;
-
+        const approxSizeBytes = (image.length * 3) / 4;
 
         if (approxSizeBytes > 8 * 1024 * 1024) {
 
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Image is too large. Maximum size is 8MB."
-
-            });
+            return res.status(400).json({ success: false, error: "Image is too large. Maximum size is 8MB." });
         }
-console.log(
-            "Image request received."
-        );
+
+        logInfo("Image request received.");
 
         try {
 
             let base64Data = image;
             let mimeType = "image/jpeg";
 
-            if (
-                image.startsWith(
-                    "data:"
-                )
-            ) {
+            const match = image.match(/^data:(.+?);base64,(.+)$/);
 
-                const match =
-                    image.match(
-                        /^data:(.+?);base64,(.+)$/
-                    );
+            if (match) {
 
-                if (!match) {
-
-                    throw new Error(
-                        "Invalid image format"
-                    );
-                }
-
-                mimeType =
-                    match[1];
-
-                base64Data =
-                    match[2];
+                mimeType = match[1];
+                base64Data = match[2];
             }
 
-            const answer =
-                await askGeminiImage(
-                    message,
-                    {
-                        mimeType:
-                            mimeType,
+            const answer = await askGeminiImage(message, { mimeType: mimeType, base64: base64Data });
 
-                        base64:
-                            base64Data
-                    }
-                );
+            logInfo("Image response received.");
 
-            console.log(
-                "Image response received."
-            );
-
-            res.json({
-
-                success: true,
-
-                provider:
-                    "Gemini",
-
-                response:
-                    answer
-
-            });
+            res.json({ success: true, provider: "Gemini", response: answer });
 
         } catch (error) {
 
-            console.log(
-                "Image AI failed:",
-                error.message
-            );
+            logError("Image AI failed", error);
 
-            res.status(500).json({
-
-                success: false,
-
-                error:
-                    "NANI AI could not analyze the image."
-
-            });
+            res.status(500).json({ success: false, error: "NANI AI could not analyze the image." });
         }
     }
 );
-
-
-// =========================================
-// AUTH MIDDLEWARE
-// =========================================
-
-function requireAuth(req, res, next) {
-
-    const authHeader =
-        req.headers.authorization;
-
-
-    if (!authHeader || !authHeader.startsWith("Bearer ")) {
-
-        return res.status(401).json({
-
-            success: false,
-
-            error:
-                "Authentication required."
-
-        });
-    }
-
-
-    const token =
-        authHeader.split(" ")[1];
-
-
-    try {
-
-        const decoded =
-            jwt.verify(token, process.env.JWT_SECRET);
-
-
-        req.user = decoded;
-
-        next();
-
-
-    } catch (error) {
-
-        return res.status(401).json({
-
-            success: false,
-
-            error:
-                "Invalid or expired token."
-
-        });
-    }
-}
-
-
-
 
 
 // =========================================
 // AUTH: SIGNUP
 // =========================================
 
-
 app.post(
     "/api/signup",
     authLimiter,
     async (req, res) => {
 
-        const username =
-            req.body.username;
+        const username = req.body.username;
+        const password = req.body.password;
 
-        const password =
-            req.body.password;
+        if (!username || typeof username !== "string" || username.trim().length < 3) {
 
-
-        if (
-            !username ||
-            typeof username !== "string" ||
-            username.trim().length < 3
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Username must be at least 3 characters."
-
-            });
+            return res.status(400).json({ success: false, error: "Username must be at least 3 characters." });
         }
 
+        if (!password || typeof password !== "string" || password.length < 6) {
 
-        if (
-            !password ||
-            typeof password !== "string" ||
-            password.length < 6
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Password must be at least 6 characters."
-
-            });
+            return res.status(400).json({ success: false, error: "Password must be at least 6 characters." });
         }
 
+        const cleanUsername = username.trim().toLowerCase();
 
-        const cleanUsername =
-            username.trim().toLowerCase();
-
-
-        const existingUser =
-            findUserByUsername(cleanUsername);
-
+        const existingUser = findUserByUsername(cleanUsername);
 
         if (existingUser) {
 
-            return res.status(409).json({
-
-                success: false,
-
-                error:
-                    "Username already exists."
-
-            });
+            return res.status(409).json({ success: false, error: "Username already exists." });
         }
-
 
         try {
 
-            const passwordHash =
-                await bcrypt.hash(password, 10);
+            const passwordHash = await bcrypt.hash(password, 10);
+            const newUserId = Date.now().toString();
 
+            createUser(newUserId, cleanUsername, passwordHash, new Date().toISOString());
 
-            const newUserId =
-                Date.now().toString();
+            logInfo("New user created: " + cleanUsername);
 
-
-            createUser(
-                newUserId,
-                cleanUsername,
-                passwordHash,
-                new Date().toISOString()
-            );
-
-
-            console.log(
-                "New user created:",
-                cleanUsername
-            );
-
-            res.json({
-
-                success: true,
-
-                message:
-                    "Account created successfully. Please log in."
-
-            });
-
+            res.json({ success: true, message: "Account created successfully. Please log in." });
 
         } catch (error) {
 
-            console.log(
-                "Signup error:",
-                error.message
-            );
+            logError("Signup error", error);
 
-
-            res.status(500).json({
-
-                success: false,
-
-                error:
-                    "Could not create account."
-
-            });
+            res.status(500).json({ success: false, error: "Could not create account." });
         }
     }
 );
+
 
 // =========================================
 // AUTH: LOGIN
@@ -1457,149 +1101,50 @@ app.post(
     authLimiter,
     async (req, res) => {
 
-        const username =
-            req.body.username;
+        const username = req.body.username;
+        const password = req.body.password;
 
-        const password =
-            req.body.password;
+        if (!username || !password || typeof username !== "string" || typeof password !== "string") {
 
-
-        if (
-            !username ||
-            !password ||
-            typeof username !== "string" ||
-            typeof password !== "string"
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Username and password are required."
-
-            });
+            return res.status(400).json({ success: false, error: "Username and password are required." });
         }
 
+        const cleanUsername = username.trim().toLowerCase();
 
-        const cleanUsername =
-            username.trim().toLowerCase();
-
-
-        const user =
-            findUserByUsername(cleanUsername);
+        const user = findUserByUsername(cleanUsername);
 
         if (!user) {
 
-            return res.status(401).json({
-
-                success: false,
-
-                error:
-                    "Invalid username or password."
-
-            });
+            return res.status(401).json({ success: false, error: "Invalid username or password." });
         }
-
 
         try {
 
-            const passwordMatches =
-                await bcrypt.compare(
-                    password,
-                    user.passwordHash
-                );
-
+            const passwordMatches = await bcrypt.compare(password, user.passwordHash);
 
             if (!passwordMatches) {
 
-                return res.status(401).json({
-
-                    success: false,
-
-                    error:
-                        "Invalid username or password."
-
-                });
+                return res.status(401).json({ success: false, error: "Invalid username or password." });
             }
 
-
-            const token =
-                jwt.sign(
-                    {
-                        userId: user.id,
-                        username: user.username
-                    },
-                    process.env.JWT_SECRET,
-                    {
-                        expiresIn: "7d"
-                    }
-                );
-
-
-            console.log(
-                "User logged in:",
-                user.username
+            const token = jwt.sign(
+                { userId: user.id, username: user.username },
+                process.env.JWT_SECRET,
+                { expiresIn: "7d" }
             );
 
+            logInfo("User logged in: " + user.username);
 
-            res.json({
-
-                success: true,
-
-                token:
-                    token,
-
-                username:
-                    user.username
-
-            });
-
+            res.json({ success: true, token: token, username: user.username });
 
         } catch (error) {
 
-            console.log(
-                "Login error:",
-                error.message
-            );
+            logError("Login error", error);
 
-
-            res.status(500).json({
-
-                success: false,
-
-                error:
-                    "Login failed."
-
-            });
+            res.status(500).json({ success: false, error: "Login failed." });
         }
     }
 );
-
-
-// =========================================
-// AUTH TEST ROUTE (temporary, for Stage 13.4 verification)
-// =========================================
-
-app.get(
-    "/api/protected-test",
-    requireAuth,
-    (req, res) => {
-
-        res.json({
-
-            success: true,
-
-            message:
-                "You are authenticated.",
-
-            user:
-                req.user
-
-        });
-    }
-);
-
 
 
 // =========================================
@@ -1610,8 +1155,7 @@ async function lookupCVE(cveId) {
 
     const cleanId = cveId.trim().toUpperCase();
 
-    const url =
-        "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=" + cleanId;
+    const url = "https://services.nvd.nist.gov/rest/json/cves/2.0?cveId=" + cleanId;
 
     const response = await fetch(url);
 
@@ -1629,43 +1173,60 @@ async function lookupCVE(cveId) {
 
     const cve = data.vulnerabilities[0].cve;
 
-    const description =
-        cve.descriptions.find(d => d.lang === "en");
+    const description = cve.descriptions.find(d => d.lang === "en");
 
     const metrics =
         cve.metrics && (cve.metrics.cvssMetricV31 || cve.metrics.cvssMetricV30 || cve.metrics.cvssMetricV2);
 
     const severity =
-        metrics && metrics[0] ? metrics[0].cvssData.baseScore + " (" + (metrics[0].cvssData.baseSeverity || "N/A") + ")" : "N/A";
+        metrics && metrics[0]
+            ? metrics[0].cvssData.baseScore + " (" + (metrics[0].cvssData.baseSeverity || "N/A") + ")"
+            : "N/A";
 
     return {
-
         id: cve.id,
-
         description: description ? description.value : "No description available.",
-
         severity: severity,
-
         published: cve.published
-
     };
 }
 
+app.get(
+    "/api/tools/cve/:id",
+    requireAuth,
+    apiLimiter,
+    async (req, res) => {
 
+        try {
+
+            const result = await lookupCVE(req.params.id);
+
+            if (!result) {
+
+                return res.status(404).json({ success: false, error: "CVE not found." });
+            }
+
+            res.json({ success: true, cve: result });
+
+        } catch (error) {
+
+            logError("CVE lookup failed", error);
+
+            res.status(500).json({ success: false, error: "Could not fetch CVE data." });
+        }
+    }
+);
 
 async function scanUrlVirusTotal(targetUrl) {
 
-    const submitResponse = await fetch(
-        "https://www.virustotal.com/api/v3/urls",
-        {
-            method: "POST",
-            headers: {
-                "x-apikey": process.env.VIRUSTOTAL_API_KEY,
-                "Content-Type": "application/x-www-form-urlencoded"
-            },
-            body: "url=" + encodeURIComponent(targetUrl)
-        }
-    );
+    const submitResponse = await fetch("https://www.virustotal.com/api/v3/urls", {
+        method: "POST",
+        headers: {
+            "x-apikey": process.env.VIRUSTOTAL_API_KEY,
+            "Content-Type": "application/x-www-form-urlencoded"
+        },
+        body: "url=" + encodeURIComponent(targetUrl)
+    });
 
     if (!submitResponse.ok) {
 
@@ -1673,15 +1234,11 @@ async function scanUrlVirusTotal(targetUrl) {
     }
 
     const submitData = await submitResponse.json();
-
     const analysisId = submitData.data.id;
 
-    const resultResponse = await fetch(
-        "https://www.virustotal.com/api/v3/analyses/" + analysisId,
-        {
-            headers: { "x-apikey": process.env.VIRUSTOTAL_API_KEY }
-        }
-    );
+    const resultResponse = await fetch("https://www.virustotal.com/api/v3/analyses/" + analysisId, {
+        headers: { "x-apikey": process.env.VIRUSTOTAL_API_KEY }
+    });
 
     if (!resultResponse.ok) {
 
@@ -1689,26 +1246,17 @@ async function scanUrlVirusTotal(targetUrl) {
     }
 
     const resultData = await resultResponse.json();
-
     const stats = resultData.data.attributes.stats;
 
     return {
-
         url: targetUrl,
-
         malicious: stats.malicious,
-
         suspicious: stats.suspicious,
-
         harmless: stats.harmless,
-
         undetected: stats.undetected,
-
         status: resultData.data.attributes.status
-
     };
 }
-
 
 app.post(
     "/api/tools/virustotal",
@@ -1739,520 +1287,482 @@ app.post(
 );
 
 
+// =========================================
+// AUTHORIZED TARGETS
+// =========================================
 
-
-app.get(
-    "/api/tools/cve/:id",
+app.post(
+    "/api/targets/declare",
     requireAuth,
-    apiLimiter,
     async (req, res) => {
 
-        try {
+        const target = req.body.target;
+        const statement = req.body.authorizationStatement;
 
-            const result = await lookupCVE(req.params.id);
+        if (!target || typeof target !== "string" || target.trim().length === 0) {
 
-            if (!result) {
+            return res.status(400).json({ success: false, error: "target is required." });
+        }
 
-                return res.status(404).json({
+        if (!statement || typeof statement !== "string" || statement.trim().length < 10) {
 
-                    success: false,
-
-                    error: "CVE not found."
-
-                });
-            }
-
-            res.json({
-
-                success: true,
-
-                cve: result
-
-            });
-
-        } catch (error) {
-
-            logError("CVE lookup failed", error);
-
-            res.status(500).json({
-
+            return res.status(400).json({
                 success: false,
-
-                error: "Could not fetch CVE data."
-
+                error: "You must explicitly confirm you own or have written permission to test this target (authorizationStatement, min 10 characters)."
             });
         }
+
+        const result = declareAuthorizedTarget(req.user.userId, target.trim(), statement.trim());
+
+        res.json({
+            success: true,
+            targetId: result.id,
+            isKnownLab: result.isKnownLab,
+            expiresAt: result.expiresAt,
+            message: result.isKnownLab
+                ? "Recognized as a known CTF/lab platform. Authorized for 24 hours."
+                : "Target declared and logged. Authorized for 24 hours based on your statement."
+        });
+    }
+);
+
+app.get(
+    "/api/targets",
+    requireAuth,
+    async (req, res) => {
+
+        const targets = getActiveAuthorizedTargets(req.user.userId);
+
+        res.json({ success: true, targets: targets });
     }
 );
 
 
 // =========================================
-// CTF SESSIONS (separate from personal memory)
+// CONVERSATIONS (multiple chat threads)
+// =========================================
+
+app.post(
+    "/api/conversations",
+    requireAuth,
+    async (req, res) => {
+
+        const id = createConversation(req.user.userId, req.body.title);
+
+        res.json({ success: true, conversationId: id });
+    }
+);
+
+app.get(
+    "/api/conversations",
+    requireAuth,
+    async (req, res) => {
+
+        const conversations = listConversations(req.user.userId);
+
+        res.json({ success: true, conversations: conversations });
+    }
+);
+
+app.get(
+    "/api/conversations/:id",
+    requireAuth,
+    async (req, res) => {
+
+        const conversation = getConversation(req.user.userId, req.params.id);
+
+        if (!conversation) {
+
+            return res.status(404).json({ success: false, error: "Conversation not found." });
+        }
+
+        res.json({ success: true, conversation: conversation });
+    }
+);
+
+app.delete(
+    "/api/conversations/:id",
+    requireAuth,
+    async (req, res) => {
+
+        const deleted = deleteConversation(req.user.userId, req.params.id);
+
+        if (!deleted) {
+
+            return res.status(404).json({ success: false, error: "Conversation not found." });
+        }
+
+        res.json({ success: true, message: "Conversation deleted." });
+    }
+);
+
+app.patch(
+    "/api/conversations/:id",
+    requireAuth,
+    async (req, res) => {
+
+        const newTitle = req.body.title;
+
+        if (!newTitle || typeof newTitle !== "string") {
+
+            return res.status(400).json({ success: false, error: "title is required." });
+        }
+
+        const renamed = renameConversation(req.user.userId, req.params.id, newTitle.trim());
+
+        if (!renamed) {
+
+            return res.status(404).json({ success: false, error: "Conversation not found." });
+        }
+
+        res.json({ success: true, message: "Conversation renamed." });
+    }
+);
+
+
+// =========================================
+// CTF SESSIONS
 // =========================================
 
 app.post(
     "/api/ctf/sessions",
     requireAuth,
-    (req, res) => {
+    async (req, res) => {
 
-        const challengeName =
-            req.body.challengeName;
+        const challengeName = req.body.challengeName;
+        const category = req.body.category;
+        const description = req.body.description;
 
-        const category =
-            req.body.category;
+        if (!challengeName || typeof challengeName !== "string" || challengeName.trim().length === 0) {
 
-        const description =
-            req.body.description;
-
-        if (
-            !challengeName ||
-            typeof challengeName !== "string" ||
-            challengeName.trim().length === 0
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                error: "challengeName is required."
-
-            });
+            return res.status(400).json({ success: false, error: "challengeName is required." });
         }
 
-        const id =
-            createCtfSession(
-                req.user.userId,
-                challengeName.trim(),
-                category || null,
-                description || null
-            );
+        const id = createCtfSession(
+            req.user.userId,
+            challengeName.trim(),
+            category || null,
+            description || null
+        );
 
-        res.json({
-
-            success: true,
-
-            sessionId: id
-
-        });
+        res.json({ success: true, sessionId: id });
     }
 );
-
 
 app.get(
     "/api/ctf/sessions",
     requireAuth,
-    (req, res) => {
+    async (req, res) => {
 
-        const sessions =
-            listCtfSessions(req.user.userId);
+        const sessions = listCtfSessions(req.user.userId);
 
-        res.json({
-
-            success: true,
-
-            sessions: sessions
-
-        });
+        res.json({ success: true, sessions: sessions });
     }
 );
-
 
 app.get(
     "/api/ctf/sessions/:id",
     requireAuth,
-    (req, res) => {
+    async (req, res) => {
 
-        const session =
-            getCtfSession(req.user.userId, req.params.id);
+        const session = getCtfSession(req.user.userId, req.params.id);
 
         if (!session) {
 
-            return res.status(404).json({
-
-                success: false,
-
-                error: "Session not found."
-
-            });
+            return res.status(404).json({ success: false, error: "Session not found." });
         }
 
-        res.json({
-
-            success: true,
-
-            session: session
-
-        });
+        res.json({ success: true, session: session });
     }
 );
-
 
 app.delete(
     "/api/ctf/sessions/:id",
     requireAuth,
-    (req, res) => {
+    async (req, res) => {
 
-        const deleted =
-            deleteCtfSession(req.user.userId, req.params.id);
+        const deleted = deleteCtfSession(req.user.userId, req.params.id);
 
         if (!deleted) {
 
-            return res.status(404).json({
-
-                success: false,
-
-                error: "Session not found."
-
-            });
+            return res.status(404).json({ success: false, error: "Session not found." });
         }
 
-        res.json({
+        res.json({ success: true, message: "Session deleted." });
+    }
+);
 
-            success: true,
+app.post(
+    "/api/ctf/sessions/:id/chat",
+    requireAuth,
+    apiLimiter,
+    async (req, res) => {
 
-            message: "Session deleted."
+        const userMessage = req.body.message;
 
-        });
+        if (!userMessage || typeof userMessage !== "string" || userMessage.trim().length === 0) {
+
+            return res.status(400).json({ success: false, error: "Message is required." });
+        }
+
+        if (userMessage.length > 8000) {
+
+            return res.status(400).json({ success: false, error: "Message is too long. Please keep it under 8000 characters." });
+        }
+
+        const session = getCtfSession(req.user.userId, req.params.id);
+
+        if (!session) {
+
+            return res.status(404).json({ success: false, error: "Session not found." });
+        }
+
+        const activeTargets = getActiveAuthorizedTargets(req.user.userId);
+
+        const targetContext =
+            activeTargets.length > 0
+                ? "AUTHORIZED TARGETS FOR THIS USER (confirmed, logged):\n" +
+                  activeTargets.map(t => "- " + t.target + (t.isKnownLab ? " (known CTF/lab platform)" : " (user-declared, self-attested)")).join("\n")
+                : "NO AUTHORIZED TARGETS DECLARED YET. If the user asks you to analyze or attack a specific live target (not a file/challenge artifact), tell them to declare it first via the authorization system before you give specific exploitation guidance against it.";
+
+        const ctfHistory = session.chatHistory;
+
+        ctfHistory.push({ role: "user", content: userMessage });
+
+        const contextText =
+            CTF_PERSONALITY +
+            "\n\n" + targetContext +
+            "\n\nCHALLENGE: " + session.challengeName +
+            (session.category ? "\nCATEGORY: " + session.category : "") +
+            (session.description ? "\nDESCRIPTION: " + session.description : "") +
+            "\n\nKNOWN CLUES SO FAR:\n" + JSON.stringify(session.clues) +
+            "\n\nFAILED APPROACHES (do not repeat these):\n" + JSON.stringify(session.failedApproaches);
+
+        let answer;
+        let provider;
+
+        try {
+
+            answer = await askGemini(
+                [{ role: "user", content: contextText }].concat(ctfHistory),
+                null
+            );
+
+            provider = "Gemini";
+
+        } catch (geminiError) {
+
+            try {
+
+                answer = await askOpenRouter(
+                    [{ role: "user", content: contextText }].concat(ctfHistory),
+                    null
+                );
+
+                provider = "OpenRouter";
+
+            } catch (openRouterError) {
+
+                ctfHistory.pop();
+
+                return res.status(500).json({ success: false, error: "Both AI providers are currently unavailable." });
+            }
+        }
+
+        ctfHistory.push({ role: "assistant", content: answer });
+
+        updateCtfSession(req.user.userId, req.params.id, { chatHistory: ctfHistory });
+
+        res.json({ success: true, provider: provider, response: answer });
     }
 );
 
 
+// =========================================
+// CTF FILE UPLOADS
+// =========================================
 
+app.post(
+    "/api/ctf/sessions/:id/files",
+    requireAuth,
+    async (req, res) => {
 
+        const session = getCtfSession(req.user.userId, req.params.id);
+
+        if (!session) {
+
+            return res.status(404).json({ success: false, error: "Session not found." });
+        }
+
+        const filename = req.body.filename;
+        const mimeType = req.body.mimeType;
+        const fileData = req.body.fileData;
+
+        if (!filename || !fileData || typeof fileData !== "string") {
+
+            return res.status(400).json({ success: false, error: "filename and fileData are required." });
+        }
+
+        let base64Only = fileData;
+
+        if (fileData.startsWith("data:")) {
+
+            const match = fileData.match(/^data:(.+?);base64,(.+)$/);
+
+            if (match) {
+                base64Only = match[2];
+            }
+        }
+
+        try {
+
+            const fileId = storeCtfFile(req.user.userId, req.params.id, filename, mimeType, base64Only);
+
+            res.json({ success: true, fileId: fileId });
+
+        } catch (error) {
+
+            res.status(400).json({ success: false, error: error.message });
+        }
+    }
+);
+
+app.get(
+    "/api/ctf/sessions/:id/files",
+    requireAuth,
+    async (req, res) => {
+
+        const files = listCtfFiles(req.user.userId, req.params.id);
+
+        res.json({ success: true, files: files });
+    }
+);
 
 
 // =========================================
-// CHAT API
+// CHAT API (regular, non-streaming)
 // =========================================
+
 app.post(
     "/api/chat",
     apiLimiter,
     requireAuth,
     async (req, res) => {
 
-        const userId =
-            req.user.userId;
+        const userId = req.user.userId;
+        const userData = loadUserData(userId);
 
-        const userData =
-            loadUserData(userId);
+        let conversationHistory = userData.conversationHistory;
+        let userProfile = userData.profile;
 
-        let conversationHistory =
-            userData.conversationHistory;
+        const userMessage = req.body.message;
 
-        let userProfile =
-            userData.profile;
+        if (!userMessage || typeof userMessage !== "string") {
 
-        const userMessage =
-            req.body.message;
-        if (
-            !userMessage ||
-            typeof userMessage !==
-                "string"
-        ) {
-
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Message is required"
-
-            });
-
+            return res.status(400).json({ success: false, error: "Message is required" });
         }
-
 
         if (userMessage.length > 8000) {
 
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Message is too long. Please keep it under 8000 characters."
-
-            });
-
+            return res.status(400).json({ success: false, error: "Message is too long. Please keep it under 8000 characters." });
         }
-
 
         if (userMessage.trim().length === 0) {
 
-            return res.status(400).json({
-
-                success: false,
-
-                error:
-                    "Message cannot be empty."
-
-            });
-
+            return res.status(400).json({ success: false, error: "Message cannot be empty." });
         }
 
-        console.log(
-    "User:",
-    userMessage
-);
+        logInfo("User: " + userMessage);
 
-// =========================================
-// MEMORY COMMANDS
-// =========================================
+        const lowerMessage = userMessage.toLowerCase().trim();
 
-const lowerMessage =
-    userMessage.toLowerCase().trim();
+        if (lowerMessage === "what do you remember about me") {
 
+            const memoryKeys = Object.keys(userProfile);
 
-// SHOW MEMORY
-// SHOW MEMORY
-if (
-    lowerMessage ===
-    "what do you remember about me"
-) {
+            if (memoryKeys.length === 0) {
 
-    const memoryKeys =
-        Object.keys(userProfile);
+                return res.json({ success: true, provider: "Memory", response: "I don't have any saved information about you yet." });
+            }
 
-    if (memoryKeys.length === 0) {
+            let memoryText = "Here is what I remember about you:\n\n";
 
-        return res.json({
+            if (userProfile.name) {
+                memoryText += "👤 Name: " + userProfile.name + "\n";
+            }
 
-            success: true,
+            if (userProfile.interests) {
 
-            provider: "Memory",
+                const interests = Array.isArray(userProfile.interests) ? userProfile.interests.join(", ") : userProfile.interests;
 
-            response:
-                "I don't have any saved information about you yet."
+                memoryText += "🎯 Interests: " + interests + "\n";
+            }
 
-        });
+            if (userProfile.favorite_language) {
+                memoryText += "💻 Favorite programming language: " + userProfile.favorite_language + "\n";
+            }
 
-    }
+            if (userProfile.project) {
+                memoryText += "🚀 Project: " + userProfile.project + "\n";
+            }
 
-    let memoryText =
-        "Here is what I remember about you:\n\n";
+            return res.json({ success: true, provider: "Memory", response: memoryText.trim() });
+        }
 
+        if (lowerMessage === "forget everything you remember about me") {
 
-    if (userProfile.name) {
+            userProfile = {};
+            userData.profile = userProfile;
+            saveUserData(userId, userData);
 
-        memoryText +=
-            "👤 Name: " +
-            userProfile.name +
-            "\n";
+            return res.json({ success: true, provider: "Memory", response: "Done. I cleared my saved personal memory." });
+        }
 
-    }
-
-
-    if (userProfile.interests) {
-
-        const interests =
-            Array.isArray(userProfile.interests)
-                ? userProfile.interests.join(", ")
-                : userProfile.interests;
-
-        memoryText +=
-            "🎯 Interests: " +
-            interests +
-            "\n";
-
-    }
-
-
-    if (userProfile.favorite_language) {
-
-        memoryText +=
-            "💻 Favorite programming language: " +
-            userProfile.favorite_language +
-            "\n";
-
-    }
-
-
-    if (userProfile.project) {
-
-        memoryText +=
-            "🚀 Project: " +
-            userProfile.project +
-            "\n";
-
-    }
-
-
-    return res.json({
-
-        success: true,
-
-        provider: "Memory",
-
-        response: memoryText.trim()
-
-    });
-
-}
-
-// FORGET ALL MEMORY
-if (
-    lowerMessage ===
-    "forget everything you remember about me"
-) {
-
-    userProfile = {};
-
-    userData.profile = userProfile;
-
-    saveUserData(userId, userData);
-    return res.json({
-
-        success: true,
-
-        provider: "Memory",
-
-        response:
-            "Done. I cleared my saved personal memory."
-
-    });
-
-}
-        conversationHistory.push({
-
-            role: "user",
-
-            content:
-                userMessage
-
-        });
-updateProfileFromMessage(userMessage,userProfile);
+        conversationHistory.push({ role: "user", content: userMessage });
+        updateProfileFromMessage(userMessage, userProfile);
 
         let answer;
-
         let provider;
-
-
-        // =================================
-        // GEMINI FIRST
-        // =================================
 
         try {
 
-            console.log(
-                "Trying Gemini..."
-            );
+            logInfo("Trying Gemini...");
 
+            answer = await askGemini(conversationHistory, userProfile);
+            provider = "Gemini";
 
-            answer =
-                await askGemini(
-                    conversationHistory
-                );
+            logInfo("Gemini response received.");
 
+        } catch (geminiError) {
 
-            provider =
-                "Gemini";
-
-
-            console.log(
-                "Gemini response received."
-            );
-
-        }
-
-
-        catch (geminiError) {
-
-            console.log(
-                "Gemini failed:",
-                geminiError.message
-            );
-
-
-            console.log(
-                "Trying OpenRouter fallback..."
-            );
-
-
-            // =============================
-            // OPENROUTER
-            // =============================
+            logWarn("Gemini failed: " + geminiError.message);
+            logInfo("Trying OpenRouter fallback...");
 
             try {
 
-                answer =
-                    await askOpenRouter(
-                        conversationHistory
-                    );
+                answer = await askOpenRouter(conversationHistory, userProfile);
+                provider = "OpenRouter";
 
+                logInfo("OpenRouter response received.");
 
-                provider =
-                    "OpenRouter";
+            } catch (openRouterError) {
 
-
-                console.log(
-                    "OpenRouter response received."
-                );
-
-            }
-
-
-            catch (openRouterError) {
-
-                console.log(
-                    "OpenRouter failed:",
-                    openRouterError.message
-                );
-
+                logWarn("OpenRouter failed: " + openRouterError.message);
 
                 conversationHistory.pop();
 
-
-                return res.status(500).json({
-
-                    success: false,
-
-                    error:
-                        "Both AI providers are currently unavailable."
-
-                });
-
+                return res.status(500).json({ success: false, error: "Both AI providers are currently unavailable." });
             }
-
         }
 
+        conversationHistory.push({ role: "assistant", content: answer });
 
-        // =================================
-        // SAVE CONVERSATION
-        // =================================
-
-        conversationHistory.push({
-
-            role: "assistant",
-
-            content:
-                answer
-
-        });
-
-
-        userData.conversationHistory =
-            conversationHistory;
-
-        userData.profile =
-            userProfile;
+        userData.conversationHistory = conversationHistory;
+        userData.profile = userProfile;
 
         saveUserData(userId, userData);
 
-        // =================================
-        // RESPONSE
-        // =================================
-
-        res.json({
-
-            success: true,
-
-            provider:
-                provider,
-
-            response:
-                answer
-
-        });
-
+        res.json({ success: true, provider: provider, response: answer });
     }
 );
 
@@ -2279,6 +1789,12 @@ app.post(
             return res.status(400).json({ success: false, error: "Message is too long." });
         }
 
+        const userId = req.user.userId;
+        const userData = loadUserData(userId);
+
+        let conversationHistory = userData.conversationHistory;
+        let userProfile = userData.profile;
+
         res.setHeader("Content-Type", "text/event-stream");
         res.setHeader("Cache-Control", "no-cache");
         res.setHeader("Connection", "keep-alive");
@@ -2287,7 +1803,6 @@ app.post(
         conversationHistory.push({ role: "user", content: userMessage });
         updateProfileFromMessage(userMessage, userProfile);
 
-
         try {
 
             let answer;
@@ -2295,21 +1810,25 @@ app.post(
 
             try {
 
-                answer = await askGeminiStream(conversationHistory, res);
+                answer = await askGeminiStream(conversationHistory, userProfile, res);
                 provider = "Gemini";
 
             } catch (geminiError) {
 
                 logWarn("Gemini stream failed, falling back to OpenRouter", geminiError);
 
-                answer = await askOpenRouter(conversationHistory);
+                answer = await askOpenRouter(conversationHistory, userProfile);
                 provider = "OpenRouter";
 
                 res.write("data: " + JSON.stringify({ chunk: answer }) + "\n\n");
             }
 
             conversationHistory.push({ role: "assistant", content: answer });
-            saveMemory(conversationHistory);
+
+            userData.conversationHistory = conversationHistory;
+            userData.profile = userProfile;
+
+            saveUserData(userId, userData);
 
             res.write("data: " + JSON.stringify({ done: true, provider: provider }) + "\n\n");
             res.end();
@@ -2323,89 +1842,59 @@ app.post(
             res.write("data: " + JSON.stringify({ error: "Both AI providers are currently unavailable." }) + "\n\n");
             res.end();
         }
-});
+    }
+);
 
 
 // =========================================
 // MEMORY MANAGEMENT API
 // =========================================
 
-// VIEW MEMORY
-app.get("/api/memory", requireAuth, (req, res) => {
+app.get("/api/memory", requireAuth, async (req, res) => {
 
-    const userData =
-        loadUserData(req.user.userId);
+    const userData = loadUserData(req.user.userId);
 
-    res.json({
-        success: true,
-        memory: userData.profile
-    });
-
+    res.json({ success: true, memory: userData.profile });
 });
 
-//=============================================
-// SAVE MEMORY MANUALLY
-//============================================
-app.post("/api/memory", requireAuth, (req, res) => {
+app.post("/api/memory", requireAuth, async (req, res) => {
 
     const key = req.body.key;
     const value = req.body.value;
 
     if (!key || value === undefined) {
 
-        return res.status(400).json({
-            success: false,
-            error: "key and value are required"
-        });
-
+        return res.status(400).json({ success: false, error: "key and value are required" });
     }
 
-    const userData =
-        loadUserData(req.user.userId);
+    const userData = loadUserData(req.user.userId);
 
     userData.profile[key] = value;
 
     saveUserData(req.user.userId, userData);
 
-    res.json({
-        success: true,
-        message: "Memory saved.",
-        memory: userData.profile
-    });
-
+    res.json({ success: true, message: "Memory saved.", memory: userData.profile });
 });
 
-// CLEAR MEMORY
-app.delete("/api/memory", requireAuth, (req, res) => {
+app.delete("/api/memory", requireAuth, async (req, res) => {
 
-    const userData =
-        loadUserData(req.user.userId);
+    const userData = loadUserData(req.user.userId);
 
     userData.profile = {};
 
     saveUserData(req.user.userId, userData);
 
-    res.json({
-        success: true,
-        message: "NANI AI memory cleared."
-    });
-
-});    
+    res.json({ success: true, message: "NANI AI memory cleared." });
+});
 
 
 // =========================================
-// 404 HANDLER (no matching route)
+// 404 HANDLER
 // =========================================
 
 app.use(function (req, res) {
 
-    res.status(404).json({
-
-        success: false,
-
-        error: "Route not found."
-
-    });
+    res.status(404).json({ success: false, error: "Route not found." });
 });
 
 
@@ -2417,57 +1906,26 @@ app.use(function (err, req, res, next) {
 
     logError("Unhandled error on " + req.method + " " + req.originalUrl, err);
 
-
     if (err.message === "Not allowed by CORS") {
 
-        return res.status(403).json({
-
-            success: false,
-
-            error: "Origin not allowed."
-
-        });
+        return res.status(403).json({ success: false, error: "Origin not allowed." });
     }
 
-
-    const response = {
-
-        success: false,
-
-        error: "An unexpected error occurred."
-
-    };
-
+    const response = { success: false, error: "An unexpected error occurred." };
 
     if (NODE_ENV === "development") {
-
         response.debug = err.message;
     }
 
-
     res.status(500).json(response);
 });
+
 
 // =========================================
 // START SERVER
 // =========================================
 
-app.listen(
-    PORT,
-    "0.0.0.0",
-    function () {
+app.listen(PORT, "0.0.0.0", function () {
 
-                console.log(
-            "NANI AI backend running on http://127.0.0.1:" +
-            PORT +
-            " [" + NODE_ENV + "]"
-        );
-
-        console.log(
-            "Memory loaded:",
-            conversationHistory.length,
-            "messages"
-        );
-
-    }
-);
+    console.log("NANI AI backend running on http://127.0.0.1:" + PORT + " [" + NODE_ENV + "]");
+});
