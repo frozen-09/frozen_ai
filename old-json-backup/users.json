@@ -1,0 +1,14 @@
+[
+  {
+    "id": "1791345432218",
+    "username": "testuser",
+    "passwordHash": "$2b$10$l.xSKPGVWAGbihwaj55ml.725XDZZDbl9duxQcDehAlCPkKHpLAMy",
+    "createdAt": "2026-10-07T03:57:12.218Z"
+  },
+  {
+    "id": "1791349402722",
+    "username": "admin",
+    "passwordHash": "$2b$10$7Drc8SCrjOFpyZatedBAr.Q78ShcjDYggggKl0DovRnH6dCC4bYe2",
+    "createdAt": "2026-10-07T05:03:22.722Z"
+  }
+]

@@ -244,7 +244,8 @@ const allowedOrigins = [
     "http://localhost:3000",
     "http://localhost:8158",
     "http://127.0.0.1:8158",
-    "https://nani-ai-frontend.onrender.com"
+    "https://nani-ai-frontend.onrender.com",
+    "https://ai-frontend.onrender.com"
 ];
 
 app.use(helmet());
@@ -1536,14 +1537,14 @@ app.post(
             (session.category ? "\nCATEGORY: " + session.category : "") +
             (session.description ? "\nDESCRIPTION: " + session.description : "") +
             "\n\nKNOWN CLUES SO FAR:\n" + JSON.stringify(session.clues) +
-            "\n\nFAILED APPROACHES (do not repeat these):\n" + JSON.stringify(session.failedApproaches);
+            "\n\nFAILED APPROACHES (do not repeat these):\n" + JSON.stringify(session.failedApproaches)+buildFileContext(req.user.userId, req.params.id);
 
         let answer;
         let provider;
 
         try {
 
-            answer = await askGemini(
+            answer = await askGroqThenGemini(
                 [{ role: "user", content: contextText }].concat(ctfHistory),
                 null
             );
@@ -1728,7 +1729,7 @@ app.post(
 
             logInfo("Trying Gemini...");
 
-            answer = await askGemini(conversationHistory, userProfile);
+            answer = await askGroqThenGemini(conversationHistory, userProfile);
             provider = "Gemini";
 
             logInfo("Gemini response received.");
@@ -1886,6 +1887,223 @@ app.delete("/api/memory", requireAuth, async (req, res) => {
 
     res.json({ success: true, message: "NANI AI memory cleared." });
 });
+
+
+
+function buildFileContext(userId, sessionId) {
+
+    const rows = db.prepare(
+        "SELECT filename, dataBase64 FROM ctf_files WHERE userId = ? AND sessionId = ? ORDER BY uploadedAt DESC"
+    ).all(userId, sessionId).slice(0, 5);
+
+    if (rows.length === 0) {
+        return "";
+    }
+
+    return "\n\nUPLOADED FILES:\n" + rows.map(function (f) {
+
+        const buf = Buffer.from(f.dataBase64, "base64");
+        const isText = !buf.subarray(0, 1000).includes(0);
+
+        if (isText) {
+            return "FILE " + f.filename + " (text):\n" + buf.toString("utf8", 0, 8000);
+        }
+
+        const strs = buf.toString("latin1").match(/[\x20-\x7e]{6,}/g) || [];
+
+        return "FILE " + f.filename + " (binary, " + buf.length + " bytes, printable strings only):\n" +
+            strs.slice(0, 200).join("\n").slice(0, 8000);
+
+    }).join("\n\n");
+}
+
+app.post("/api/ctf/sessions/:id/notes", requireAuth, async (req, res) => {
+
+    const s = getCtfSession(req.user.userId, req.params.id);
+
+    if (!s) {
+        return res.status(404).json({ success: false, error: "Session not found." });
+    }
+
+    const text = req.body.text;
+
+    if (!text || typeof text !== "string") {
+        return res.status(400).json({ success: false, error: "text is required." });
+    }
+
+    if (req.body.type === "failed") {
+        s.failedApproaches.push(text);
+    } else {
+        s.clues.push(text);
+    }
+
+    updateCtfSession(req.user.userId, req.params.id,
+        { clues: s.clues, failedApproaches: s.failedApproaches });
+
+    res.json({ success: true });
+});
+
+app.post("/api/ctf/sessions/:id/status", requireAuth, async (req, res) => {
+
+    const ok = updateCtfSession(req.user.userId, req.params.id,
+        { status: req.body.status === "solved" ? "solved" : "active" });
+
+    res.json({ success: ok });
+});
+
+
+const GROQ_MODEL = process.env.GROQ_MODEL || "llama-3.3-70b-versatile";
+
+function groqMessages(history, userProfile) {
+
+    return [
+        {
+            role: "system",
+            content:
+                NANI_PERSONALITY +
+                "\n\nLONG-TERM USER MEMORY:\n" +
+                JSON.stringify(userProfile || {}, null, 2) +
+                "\n\nUse this memory when relevant. Do not reveal private credentials."
+        },
+        ...history.slice(-20)
+    ];
+}
+
+async function askGroq(history, userProfile) {
+
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Authorization": "Bearer " + process.env.GROQ_API_KEY,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            model: GROQ_MODEL,
+            messages: groqMessages(history, userProfile)
+        })
+    });
+
+    if (!response.ok) {
+
+        let msg = "HTTP " + response.status;
+
+        try {
+            const e = await response.json();
+            if (e.error && e.error.message) msg = e.error.message;
+        } catch (x) { /* ignore */ }
+
+        throw new Error("Groq failed: " + response.status + " - " + msg);
+    }
+
+    const data = await response.json();
+
+    if (!data.choices || !data.choices[0] || !data.choices[0].message || !data.choices[0].message.content) {
+        throw new Error("Groq returned an empty response");
+    }
+
+    logInfo("Groq answered (" + GROQ_MODEL + ")");
+
+    return data.choices[0].message.content;
+}
+
+async function askGroqThenGemini(history, userProfile) {
+
+    if (process.env.GROQ_API_KEY) {
+
+        try {
+            return await askGroq(history, userProfile);
+        } catch (e) {
+            logWarn("Groq failed, trying Gemini: " + e.message);
+        }
+    }
+
+    return askGemini(history, userProfile);
+}
+
+async function askGroqStream(history, userProfile, res) {
+
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+        method: "POST",
+        headers: {
+            "Authorization": "Bearer " + process.env.GROQ_API_KEY,
+            "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+            model: GROQ_MODEL,
+            messages: groqMessages(history, userProfile),
+            stream: true
+        })
+    });
+
+    if (!response.ok) {
+        throw new Error("Groq stream failed: " + response.status);
+    }
+
+    let fullText = "";
+
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+
+        const { done, value } = await reader.read();
+
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop();
+
+        for (const line of lines) {
+
+            if (!line.startsWith("data: ")) continue;
+
+            const jsonStr = line.slice(6).trim();
+
+            if (!jsonStr || jsonStr === "[DONE]") continue;
+
+            try {
+
+                const parsed = JSON.parse(jsonStr);
+
+                const chunk =
+                    parsed.choices && parsed.choices[0] &&
+                    parsed.choices[0].delta && parsed.choices[0].delta.content;
+
+                if (chunk) {
+                    fullText += chunk;
+                    res.write("data: " + JSON.stringify({ chunk: chunk }) + "\n\n");
+                }
+
+            } catch (e) { /* skip bad chunk */ }
+        }
+    }
+
+    if (!fullText) {
+        throw new Error("Groq stream returned no text");
+    }
+
+    logInfo("Groq stream answered (" + GROQ_MODEL + ")");
+
+    return fullText;
+}
+
+async function askStreamChain(history, userProfile, res) {
+
+    if (process.env.GROQ_API_KEY) {
+
+        try {
+            return await askGroqStream(history, userProfile, res);
+        } catch (e) {
+            logWarn("Groq stream failed, trying Gemini: " + e.message);
+        }
+    }
+
+    return askGeminiStream(history, userProfile, res);
+}
+
 
 
 // =========================================
